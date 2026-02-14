@@ -3,7 +3,8 @@ name = "hooking"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-readme = "README.md"
+description = "hooking libs in rust"
+readme = "../README.md"
 repository = "https://github.com/pigeonhands/hooking-rs"
 
 [dependencies]
