@@ -3,11 +3,17 @@ use std::{arch::asm, ffi::CStr};
 use hooking::{HookData, HookWriter};
 
 unsafe extern "C" fn hook(s: *const libc::c_char) {
-    unsafe {
-        asm!("20002:", "nop", "nop", "nop", "nop", "nop",);
-    }
     let param_s = unsafe { CStr::from_ptr(s) };
-    println!("puts was hooked!: Input: {:?}", param_s);
+
+    let original_puts: extern "C" fn(*const libc::c_char) =
+        unsafe { std::mem::transmute(hooking::original_function_ptr().as_ptr()) };
+
+    println!(
+        "Hooked function param: {:?} | Original fn restore jump: {:?}",
+        param_s, original_puts
+    );
+
+    original_puts(c"Call original puts restore detour".as_ptr());
 }
 
 fn main() {
@@ -17,7 +23,6 @@ fn main() {
             .write_hook(None, c"puts", hook as *mut u8)
             .unwrap()
     };
-    println!("{:#?}", hook);
 
     let HookData {
         trampoline_data, ..

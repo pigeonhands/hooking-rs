@@ -2,9 +2,10 @@ use core::ffi;
 use core::{ffi::CStr, ptr::NonNull};
 use iced_x86::{
     BlockEncoder, BlockEncoderResult, Code, Decoder, DecoderOptions, Encoder, Instruction,
-    InstructionBlock, Register,
+    InstructionBlock, MemoryOperand, Register,
 };
 
+use crate::mem::ExecWriteGuard;
 use crate::table::{HookHeap, HookHeapWriter};
 
 static HOOK_HEAP: HookHeap = HookHeap::new();
@@ -52,47 +53,70 @@ impl<'a> HookWriter<'a> {
         module: Option<&CStr>,
         symbol: &CStr,
         destination: *mut u8,
-    ) -> Option<Hook<'a>> {
-        let destination_fn = NonNull::new(destination as *mut ffi::c_void)?;
+    ) -> Result<Hook<'a>, ()> {
+        let destination_fn = NonNull::new(destination as *mut ffi::c_void).ok_or(())?;
 
         let module_handle = if let Some(module_name) = module {
-            ModuleHandle::from_name(module_name)?
+            ModuleHandle::from_name(module_name).ok_or(())?
         } else {
             ModuleHandle::none()
         };
 
         let sym_addr =
-            NonNull::new(unsafe { libc::dlsym(module_handle.handle(), symbol.as_ptr()) })?;
+            NonNull::new(unsafe { libc::dlsym(module_handle.handle(), symbol.as_ptr()) })
+                .ok_or(())?;
 
-        let data = unsafe { self.write_hook_table(sym_addr, destination_fn)? };
-
-        Some(Hook { data })
+        unsafe { self.write_hook_fn_ptr(sym_addr, destination_fn) }
+    }
+    pub unsafe fn write_hook_fn_ptr(
+        &self,
+        target: NonNull<ffi::c_void>,
+        destination: NonNull<ffi::c_void>,
+    ) -> Result<Hook<'a>, ()> {
+        let data = unsafe { self.write_hook_table(target, destination)? };
+        Ok(Hook { data })
     }
 
     fn write_instructions(
         &self,
         eip: usize,
         instructions: &[Instruction],
-    ) -> Option<BlockEncoderResult> {
+    ) -> Result<BlockEncoderResult, ()> {
         let block = InstructionBlock::new(&instructions, eip as u64);
-        let result = BlockEncoder::encode(self.bitness(), block, 0).ok()?;
-        Some(result)
+        let result = BlockEncoder::encode(self.bitness(), block, 0).unwrap();
+        Ok(result)
     }
 
     pub unsafe fn write_hook_table(
         &self,
         sym_addr: NonNull<ffi::c_void>,
         destination_fn: NonNull<ffi::c_void>,
-    ) -> Option<HookData<'a>> {
+    ) -> Result<HookData<'a>, ()> {
         let mut write_lock = self.hook_heap.start_write();
+        let _write_guard = write_lock.make_heap_writable()?;
+
+        write_lock.allocate_heap();
+
+        let restore_fn_ptr =
+            write_lock.write_bytes(&(0xaaaaaaaaaaaaaaaa as usize).to_be_bytes())?;
+
         let mut rip = write_lock.current_address()? as usize;
 
         let (hook_frame, _hook_frame_size) = {
             let result = self.write_instructions(
                 rip,
                 &[
+                    Instruction::with2(
+                        Code::Mov_r64_rm64,
+                        Register::R10,
+                        MemoryOperand::with_base_displ(
+                            Register::RIP,
+                            restore_fn_ptr.as_ptr() as i64,
+                        ),
+                    )
+                    .map_err(|_| ())?,
                     Instruction::with_branch(Code::Jmp_rel32_64, destination_fn.as_ptr() as u64)
-                        .ok()?,
+                        .map_err(|_| ())?,
                     Instruction::with(Code::Nopd),
                 ],
             )?;
@@ -109,7 +133,7 @@ impl<'a> HookWriter<'a> {
                 rip,
                 &[
                     Instruction::with_branch(Code::Jmp_rel32_64, hook_frame.as_ptr() as u64)
-                        .ok()?,
+                        .map_err(|_| ())?,
                     Instruction::with(Code::Nopd),
                 ],
             )?;
@@ -135,24 +159,23 @@ impl<'a> HookWriter<'a> {
 
             while instructions_read < trampoline_size {
                 if !decoder.can_decode() {
-                    return None;
+                    return Err(());
                 }
                 let instr = decoder.decode();
-                encoder.encode(&instr, rip as u64).ok()?;
-                rip += instr.len();
-                instructions_read += instr.len();
+                let encoded = encoder.encode(&instr, rip as u64).map_err(|_| ())?;
+                rip += encoded;
+                instructions_read += encoded;
             }
 
+            let sym_addr_after_replaced = sym_addr.as_ptr() as u64 + instructions_read as u64;
             let additional_instructions = [
-                Instruction::with_branch(Code::Jmp_rel32_64, unsafe {
-                    sym_addr.add(instructions_read).as_ptr() as u64
-                })
-                .ok()?,
+                Instruction::with_branch(Code::Jmp_rel32_64, sym_addr_after_replaced)
+                    .map_err(|_| ())?,
                 Instruction::with(Code::Nopd),
             ];
 
             for instr in &additional_instructions {
-                encoder.encode(&instr, rip as u64).ok()?;
+                encoder.encode(&instr, rip as u64).map_err(|_| ())?;
                 rip += instr.len();
             }
 
@@ -164,7 +187,17 @@ impl<'a> HookWriter<'a> {
             (code_addr, code_size)
         };
 
-        Some(HookData {
+        unsafe {
+            let write_restore_addr: usize = restore_hook_addr.as_ptr() as usize;
+            restore_fn_ptr.cast().write(write_restore_addr);
+            //     core::ptr::copy_nonoverlapping(
+            //         restore_hook_addr.as_ptr(),
+            //         restore_fn_ptr.as_ptr(),
+            //         core::mem::size_of::<usize>(),
+            //     );
+        }
+
+        Ok(HookData {
             symbol_address: sym_addr,
             trampoline_data: unsafe {
                 core::slice::from_raw_parts(trampoline_addr.as_ptr() as *const _, trampoline_size)

@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::mem::ExecWriteGuard;
 
 #[derive(Debug, Default)]
-struct HeapState<const HEAP_SIZE: usize> {
+pub(crate) struct HeapState<const HEAP_SIZE: usize> {
     heap_start: Option<NonNull<ffi::c_void>>,
     capacity: usize,
     index: usize,
@@ -27,7 +27,7 @@ impl<const HEAP_SIZE: usize> HeapState<HEAP_SIZE> {
         self.page_size
     }
 
-    pub unsafe fn heap_addr(&mut self) -> Option<NonNull<ffi::c_void>> {
+    pub unsafe fn heap_addr(&mut self) -> Result<NonNull<ffi::c_void>, ()> {
         if self.heap_start.is_none() {
             let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
             let mem_size = if HEAP_SIZE == 0 {
@@ -51,7 +51,7 @@ impl<const HEAP_SIZE: usize> HeapState<HEAP_SIZE> {
             self.capacity = self.heap_start.map_or(0, |_| mem_size);
         }
 
-        self.heap_start
+        self.heap_start.ok_or(())
     }
 }
 
@@ -70,7 +70,7 @@ impl<const HEAP_SIZE: usize> Drop for HeapState<HEAP_SIZE> {
 #[derive(Debug)]
 pub struct HookHeap<const HEAP_SIZE: usize = 0> {
     locked: AtomicBool,
-    state: UnsafeCell<HeapState<HEAP_SIZE>>,
+    pub(crate) state: UnsafeCell<HeapState<HEAP_SIZE>>,
 }
 unsafe impl<const HEAP_SIZE: usize> Sync for HookHeap<HEAP_SIZE> {}
 
@@ -113,7 +113,11 @@ impl<'a, const HEAP_SIZE: usize> HookHeapWriter<'a, HEAP_SIZE> {
         unsafe { &mut *self.heap.state.get() }
     }
 
-    pub fn current_address(&self) -> Option<*const ffi::c_void> {
+    pub fn allocate_heap(&self) {
+        let _ = unsafe { self.state().heap_addr() };
+    }
+
+    pub fn current_address(&self) -> Result<*const ffi::c_void, ()> {
         unsafe {
             let state = self.state();
             state
@@ -122,23 +126,32 @@ impl<'a, const HEAP_SIZE: usize> HookHeapWriter<'a, HEAP_SIZE> {
         }
     }
 
-    pub fn write_bytes(&mut self, buffer: &[u8]) -> Option<NonNull<ffi::c_void>> {
+    pub fn make_heap_writable(&self) -> Result<ExecWriteGuard, ()> {
+        let state = self.state();
+        let write_address = unsafe { state.heap_addr()?.add(state.index) };
+        let write_handle = ExecWriteGuard::write_to(write_address, state.page_size);
+        Ok(write_handle)
+    }
+
+    pub fn write_bytes(&mut self, buffer: &[u8]) -> Result<NonNull<ffi::c_void>, ()> {
         let state = self.state();
         if state.index + buffer.len() > state.capacity {
-            return None;
+            return Err(());
         }
 
         let write_address = unsafe { state.heap_addr()?.add(state.index) };
 
-        let mut write_handle = ExecWriteGuard::write_to(write_address, state.page_size);
-
         unsafe {
-            ptr::copy_nonoverlapping(buffer.as_ptr(), write_handle.as_ptr(), buffer.len());
+            ptr::copy_nonoverlapping(
+                buffer.as_ptr(),
+                write_address.as_ptr() as *mut _,
+                buffer.len(),
+            );
         }
 
         state.index += buffer.len();
 
-        Some(write_address)
+        Ok(write_address)
     }
 }
 impl<'a, const HEAP_SIZE: usize> Drop for HookHeapWriter<'a, HEAP_SIZE> {
