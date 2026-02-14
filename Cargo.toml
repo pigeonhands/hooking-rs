@@ -1,6 +1,3 @@
 [workspace]
-members = [
-    "hooking",
-    #"hooking-macros",
-]
+members = ["hooking", "hooking_macros"]
 resolver = "2"
