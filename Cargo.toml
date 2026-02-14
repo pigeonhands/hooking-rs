@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "hooking",
+    #"hooking-macros",
+]
+resolver = "2"
