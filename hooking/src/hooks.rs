@@ -102,7 +102,7 @@ impl<'a> HookWriter<'a> {
 
         let mut rip = write_lock.current_address()? as usize;
 
-        let (hook_frame, _hook_frame_size) = {
+        let (trampoline_addr, trampoline_size) = {
             let result = self.write_instructions(
                 rip,
                 &[
@@ -116,23 +116,6 @@ impl<'a> HookWriter<'a> {
                     )
                     .map_err(|_| ())?,
                     Instruction::with_branch(Code::Jmp_rel32_64, destination_fn.as_ptr() as u64)
-                        .map_err(|_| ())?,
-                    Instruction::with(Code::Nopd),
-                ],
-            )?;
-
-            let code_addr = write_lock.write_bytes(&result.code_buffer)?;
-            let code_size = result.code_buffer.len() as usize;
-
-            rip += code_size;
-            (code_addr, code_size)
-        };
-
-        let (trampoline_addr, trampoline_size) = {
-            let result = self.write_instructions(
-                rip,
-                &[
-                    Instruction::with_branch(Code::Jmp_rel32_64, hook_frame.as_ptr() as u64)
                         .map_err(|_| ())?,
                     Instruction::with(Code::Nopd),
                 ],

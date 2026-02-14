@@ -2,7 +2,15 @@
 name = "hooking"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/pigeonhands/hooking-rs"
 
 [dependencies]
-iced-x86 = { version = "1.21.0", default-features = false, features = ["no_std", "decoder", "encoder", "block_encoder"] }
+iced-x86 = { version = "1.21.0", default-features = false, features = [
+    "no_std",
+    "decoder",
+    "encoder",
+    "block_encoder",
+] }
 libc = "0.2.182"
