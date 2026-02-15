@@ -45,9 +45,9 @@ fn main() {
     };
 
     println!("Applying hook");
-    hook.apply_hook().unwrap();
 
     unsafe {
+        hook.apply_hook().unwrap();
         MessageBoxA(
             std::ptr::null_mut(),
             c"Am i hooked?".as_ptr(),
@@ -56,8 +56,8 @@ fn main() {
         );
     }
 
-    hook.remove_hook().unwrap();
     unsafe {
+        hook.remove_hook().unwrap();
         MessageBoxA(
             std::ptr::null_mut(),
             c"Not hooked anymore".as_ptr(),

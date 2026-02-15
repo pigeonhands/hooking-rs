@@ -38,7 +38,7 @@ impl Hook<'static, DefaultMemoryController> {
 }
 
 impl<'a, M: MemoryController> Hook<'a, M> {
-    pub fn apply_hook(&mut self) -> Result<()> {
+    pub unsafe fn apply_hook(&mut self) -> Result<()> {
         if self.is_applied {
             return Ok(());
         }
@@ -63,7 +63,7 @@ impl<'a, M: MemoryController> Hook<'a, M> {
 
         Ok(())
     }
-    pub fn remove_hook(&mut self) -> Result<()> {
+    pub unsafe fn remove_hook(&mut self) -> Result<()> {
         if !self.is_applied {
             return Ok(());
         }
