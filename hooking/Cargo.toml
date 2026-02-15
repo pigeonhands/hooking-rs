@@ -7,12 +7,18 @@ description = "hooking libs in rust"
 readme = "../README.md"
 repository = "https://github.com/pigeonhands/hooking-rs"
 
+[features]
+default = []
+win_close_alloc = []
+
 [dependencies]
 iced-x86 = { version = "1.21.0", default-features = false, features = [
-"std",
+    "std",
     "decoder",
     "encoder",
     "block_encoder",
+    "code_asm",
+    "instr_info"
 ] }
 thiserror = "2.0.18"
 

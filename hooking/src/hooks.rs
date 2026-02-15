@@ -4,25 +4,102 @@ use std::ffi::c_void;
 
 use crate::asm::{DefaultHookAssembler, HookAssembler};
 use crate::error::{HookingError, Result};
-use crate::mem::{DefaultMemoryController, HookHeap, MemoryController};
+use crate::mem::{DefaultMemoryController, HookHeap, MemoryController, MemoryProtection};
 
 static HOOK_HEAP: HookHeap<DefaultMemoryController> = HookHeap::new();
 
 #[derive(Debug)]
 pub struct Hook<'a, M: MemoryController = DefaultMemoryController> {
     pub data: HookData<'a, M>,
+    is_applied: bool,
+}
+
+impl Hook<'static, DefaultMemoryController> {
+    pub unsafe fn by_name(
+        module: Option<&CStr>,
+        symbol: &CStr,
+        destination: *mut u8,
+    ) -> Result<Self> {
+        let hook_writer = HookWriter::from_static();
+        unsafe { hook_writer.create_hook_by_name(module, symbol, destination) }
+    }
+
+    pub unsafe fn create(target: *mut u8, destination: *mut u8) -> Result<Self> {
+        let hook_writer = HookWriter::from_static();
+        unsafe {
+            hook_writer.create_hook(
+                NonNull::new(target as *mut _)
+                    .ok_or(HookingError::InvalidTarget(target as *const _))?,
+                NonNull::new(destination as *mut _)
+                    .ok_or(HookingError::InvalidDestination(destination as *const _))?,
+            )
+        }
+    }
 }
 
 impl<'a, M: MemoryController> Hook<'a, M> {
-    pub fn apply_hook(&mut self) {}
+    pub fn apply_hook(&mut self) -> Result<()> {
+        if self.is_applied {
+            return Ok(());
+        }
+        let HookData {
+            mem,
+            patch_data,
+            symbol_address,
+            ..
+        } = &self.data;
+
+        let _protection_guard =
+            mem.protection_guard_for_page(*symbol_address, MemoryProtection::ReadWrite, None)?;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                patch_data.as_ptr(),
+                symbol_address.as_ptr() as *mut _,
+                patch_data.len(),
+            );
+        }
+        self.is_applied = true;
+
+        Ok(())
+    }
+    pub fn remove_hook(&mut self) -> Result<()> {
+        if !self.is_applied {
+            return Ok(());
+        }
+
+        let HookData {
+            mem,
+            patch_data,
+            original_instructions,
+            symbol_address,
+            ..
+        } = &self.data;
+
+        let _protection_guard =
+            mem.protection_guard_for_page(*symbol_address, MemoryProtection::ReadWrite, None)?;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                original_instructions.as_ptr(),
+                symbol_address.as_ptr() as *mut _,
+                patch_data.len(),
+            );
+        }
+
+        self.is_applied = false;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 pub struct HookData<'a, M: MemoryController> {
     pub symbol_address: NonNull<ffi::c_void>,
     pub trampoline_data: &'a [u8],
-    pub restore_stub_data: &'a [u8],
+    pub original_fn_call_stub_data: &'a [u8],
     pub patch_data: Vec<u8>,
+    pub original_instructions: Vec<u8>,
     mem: &'a M,
 }
 
@@ -67,12 +144,15 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
         destination: NonNull<c_void>,
     ) -> Result<Hook<'a, M>> {
         let hook_data = unsafe { self.write_hook_table(target, destination)? };
-        Ok(Hook { data: hook_data })
+        Ok(Hook {
+            data: hook_data,
+            is_applied: false,
+        })
     }
 
     pub unsafe fn write_hook_table(
         &self,
-        sym_addr: NonNull<ffi::c_void>,
+        target: NonNull<ffi::c_void>,
         destination_fn: NonNull<ffi::c_void>,
     ) -> Result<HookData<'a, M>> {
         let mut heap_handle = self.hook_heap.get_handle()?;
@@ -96,12 +176,12 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
 
         let patch = self
             .asm
-            .assemble_patch(sym_addr.as_ptr() as usize, trampoline_address)?;
+            .assemble_patch(target.as_ptr() as usize, trampoline_address)?;
 
-        let (restore_stub_address, restore_stub_size) = {
+        let (original_fn_call_stub_address, restore_stub_size) = {
             let restore_stub = self
                 .asm
-                .relocate_instructions(eip, sym_addr, patch.len(), true)?;
+                .relocate_instructions(eip, target, patch.len(), true)?;
 
             //eip += restore_stub.len();
             (
@@ -111,23 +191,27 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
         };
 
         unsafe {
-            let write_restore_addr: usize = restore_stub_address.as_ptr() as usize;
+            let write_restore_addr: usize = original_fn_call_stub_address.as_ptr() as usize;
             restore_fn_address.cast().write(write_restore_addr);
         }
 
+        let original_fn_instructions =
+            unsafe { std::slice::from_raw_parts(target.as_ptr() as *const u8, patch.len()) };
+
         Ok(HookData {
             mem: &self.hook_heap.mem,
-            symbol_address: sym_addr,
+            symbol_address: target,
             patch_data: patch,
+            original_instructions: original_fn_instructions.into(),
             trampoline_data: unsafe {
                 core::slice::from_raw_parts(
                     trampoline_address.as_ptr() as *const _,
                     trampoline_size,
                 )
             },
-            restore_stub_data: unsafe {
+            original_fn_call_stub_data: unsafe {
                 core::slice::from_raw_parts(
-                    restore_stub_address.as_ptr() as *const _,
+                    original_fn_call_stub_address.as_ptr() as *const _,
                     restore_stub_size,
                 )
             },

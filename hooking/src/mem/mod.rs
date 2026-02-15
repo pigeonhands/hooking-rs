@@ -15,7 +15,7 @@ pub mod inner {
 }
 
 pub mod error;
-
+pub mod page;
 pub mod table;
 use std::{
     ffi::{CStr, c_void},
@@ -25,6 +25,8 @@ use std::{
 pub use error::{MemoryError, Result};
 pub use table::{HeapState, HookHeap, MemoryHeapHandle, MemoryWriteHandle};
 
+use crate::mem::page::MemoryProtectionGuard;
+
 pub type DefaultMemoryController = inner::MemoryController;
 
 #[derive(Debug, Clone, Copy)]
@@ -32,14 +34,16 @@ pub enum MemoryProtection {
     NoAccess,
     ReadWrite,
     ReadExecute,
+    Other(usize),
 }
 
 pub trait MemoryHandle: Sized {
+    fn from_ptr(ptr: NonNull<c_void>) -> Self;
     fn as_ptr(&self) -> NonNull<c_void>;
 }
 
 pub trait MemoryController {
-    type Handle: MemoryHandle;
+    type Handle: MemoryHandle + Copy + Clone;
     type AllocationInfoType: AllocationInfo<Self>;
 
     unsafe fn get_symbol_address(
@@ -54,6 +58,28 @@ pub trait MemoryController {
         size: usize,
         protection: MemoryProtection,
     ) -> Result<()>;
+
+    fn protection_guard_for_page<'a>(
+        &'a self,
+        ptr: NonNull<c_void>,
+        on_enter: MemoryProtection,
+        on_exit: Option<MemoryProtection>,
+    ) -> Result<MemoryProtectionGuard<'a, Self>>
+    where
+        Self: Sized;
+
+    fn protection_guard<'a>(
+        &'a self,
+        memory_start: Self::Handle,
+        memory_size: usize,
+        on_enter: MemoryProtection,
+        on_exit: MemoryProtection,
+    ) -> Result<MemoryProtectionGuard<'a, Self>>
+    where
+        Self: Sized,
+    {
+        MemoryProtectionGuard::guard(self, on_enter, on_exit, memory_start, memory_size)
+    }
 }
 
 pub trait AllocationInfo<C: MemoryController + ?Sized>: Sized {

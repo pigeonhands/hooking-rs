@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::mem::page::MemoryProtectionGuard;
 use crate::mem::{AllocationInfo, DefaultMemoryController, MemoryHandle, MemoryProtection};
 
 use super::MemoryController;
@@ -85,8 +86,8 @@ pub struct MemoryHeapHandle<'a, C: MemoryController> {
     mem: &'a C,
 }
 
-impl<'a, C: MemoryController> MemoryHeapHandle<'a, C> {
-    pub fn begin_write(&mut self) -> Result<MemoryWriteHandle<'a, '_, C>> {
+impl<'a, M: MemoryController> MemoryHeapHandle<'a, M> {
+    pub fn begin_write(&mut self) -> Result<MemoryWriteHandle<'a, '_, M>> {
         MemoryWriteHandle::new_from(self)
     }
 
@@ -122,37 +123,34 @@ impl<'a, C: MemoryController> MemoryHeapHandle<'a, C> {
         Ok(write_address)
     }
 
-    unsafe fn set_page_protection(&mut self, protection: MemoryProtection) -> Result<()> {
+    pub fn protection_guard(
+        &self,
+        on_enter: MemoryProtection,
+        on_exit: MemoryProtection,
+    ) -> Result<MemoryProtectionGuard<'a, M>> {
         let allocation = self.state.allocation()?;
-        unsafe {
-            self.mem.set_page_protection(
-                allocation.allocation_start(),
-                allocation.allocation_size(),
-                protection,
-            )
-        }
-    }
 
-    pub unsafe fn make_writable(&mut self) -> Result<()> {
-        unsafe { self.set_page_protection(MemoryProtection::ReadWrite) }
-    }
-
-    pub unsafe fn make_executable(&mut self) -> Result<()> {
-        unsafe { self.set_page_protection(MemoryProtection::ReadExecute) }
+        self.mem.protection_guard(
+            allocation.allocation_start(),
+            allocation.allocation_size(),
+            on_enter,
+            on_exit,
+        )
     }
 }
 
-pub struct MemoryWriteHandle<'a, 'b, C: MemoryController> {
-    heap: &'b mut MemoryHeapHandle<'a, C>,
+pub struct MemoryWriteHandle<'a, 'b, M: MemoryController> {
+    heap: &'b mut MemoryHeapHandle<'a, M>,
+    _guard: MemoryProtectionGuard<'a, M>,
 }
 
-impl<'a, 'b, C: MemoryController> MemoryWriteHandle<'a, 'b, C> {
-    pub fn new_from(state: &'b mut MemoryHeapHandle<'a, C>) -> Result<Self> {
-        let handle = Self { heap: state };
-
-        unsafe {
-            handle.heap.make_writable()?;
-        }
+impl<'a, 'b, M: MemoryController> MemoryWriteHandle<'a, 'b, M> {
+    pub fn new_from(handle: &'b mut MemoryHeapHandle<'a, M>) -> Result<Self> {
+        let handle = Self {
+            _guard: handle
+                .protection_guard(MemoryProtection::ReadWrite, MemoryProtection::ReadExecute)?,
+            heap: handle,
+        };
 
         Ok(handle)
     }
@@ -175,13 +173,5 @@ impl<'a, 'b, C: MemoryController> MemoryWriteHandle<'a, 'b, C> {
             );
         }
         Ok(write_address)
-    }
-}
-
-impl<'a, 'b, C: MemoryController> Drop for MemoryWriteHandle<'a, 'b, C> {
-    fn drop(&mut self) {
-        unsafe {
-            self.heap.make_executable().unwrap();
-        }
     }
 }

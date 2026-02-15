@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, HookingError>;
@@ -12,4 +14,10 @@ pub enum HookingError {
 
     #[error("Provided destination for hook \"{0}\" was null")]
     NoDestination(String),
+
+    #[error("Provided target for hook {0:?} is invalid")]
+    InvalidTarget(*const c_void),
+
+    #[error("Provided destination for hook {0:?} is invalid")]
+    InvalidDestination(*const c_void),
 }

@@ -27,4 +27,7 @@ pub enum MemoryError {
 
     #[error("Cant find symbol with name {0}")]
     CantFindSymbol(String),
+
+    #[error("Address is not usable for this situation")]
+    BadAdress(*const std::ffi::c_void),
 }

@@ -1,6 +1,6 @@
 use iced_x86::{
-    BlockEncoder, BlockEncoderResult, Code, Decoder, DecoderOptions, Encoder, Instruction,
-    InstructionBlock, MemoryOperand, Register,
+    BlockEncoder, BlockEncoderResult, Code, ConditionCode, Decoder, DecoderOptions, Encoder,
+    Instruction, InstructionBlock, MemoryOperand, OpKind, Register, code_asm::*,
 };
 use std::{ffi::c_void, ptr::NonNull};
 
@@ -84,37 +84,105 @@ impl HookAssembler for HookAssemblerx86_64 {
             core::slice::from_raw_parts(source_address.as_ptr() as *const u8, min_size_bytes + 20)
         };
 
-        let mut encoder = Encoder::new(self.bitness());
+        let mut a = CodeAssembler::new(self.bitness())?;
 
-        let mut decoder = Decoder::with_ip(64, target_fn_data, eip as u64, DecoderOptions::NONE);
+        let mut decoder = Decoder::with_ip(
+            self.bitness(),
+            target_fn_data,
+            source_address.as_ptr() as u64,
+            DecoderOptions::NONE,
+        );
 
-        let mut relitive_eip = 0;
-
-        while relitive_eip < min_size_bytes {
+        let mut instruction_size_read = 0;
+        while instruction_size_read < min_size_bytes {
             if !decoder.can_decode() {
                 return Err(AssemblyError::RelocationError);
             }
-            let instr = decoder.decode();
-            let encoded = encoder.encode(&instr, (eip + relitive_eip) as u64)?;
-            relitive_eip += encoded;
+            let mut instr = decoder.decode();
+            instruction_size_read += instr.len();
+
+            let mem_displacement = instr.memory_displacement64();
+            if self.bitness() == 64 && mem_displacement != 0 {
+                //  relative addressing is done with 32bit offsets
+                //  even on 64bit. Move the absolute address into a reg
+                //  then patch the instruction to use the register.
+
+                if instr.memory_base() == Register::RIP {
+                    a.push(r10)?;
+                    a.mov(r10, mem_displacement)?;
+
+                    instr.set_memory_base(Register::R10);
+                    instr.set_memory_displacement64(0);
+                    a.add_instruction(instr)?;
+
+                    a.pop(r10)?;
+                } else if instr.is_call_near() {
+                    // a.push(r10)?;
+                    // a.mov(r10, mem_displacement)?;
+                    // a.call(r10)?;
+                    // a.pop(r10)?;
+
+                    let mut rip_0 = a.create_label();
+                    a.call(rip_0)?;
+                    a.set_label(&mut rip_0)?;
+                    a.dq(&[mem_displacement])?;
+                } else if instr.is_jmp_short_or_near() {
+                    // a.mov(r10, mem_displacement)?;
+                    // a.jmp(r10)?;
+                    a.db(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])?; //JMP [RAX+0]
+                    a.dq(&[mem_displacement])?;
+                } else if instr.is_jcc_short_or_near() {
+                    // there is no such thing as a conditional 64bit jump
+                    // so we create a non-conditional jump and cnditionally
+                    // skip it if the reverse conditional is true.
+
+                    let mut skip_to = a.create_label();
+
+                    match instr.condition_code() {
+                        ConditionCode::e => a.jne(skip_to)?,
+                        ConditionCode::ne => a.je(skip_to)?,
+                        ConditionCode::b => a.jae(skip_to)?,
+                        ConditionCode::ae => a.jb(skip_to)?,
+                        ConditionCode::be => a.ja(skip_to)?,
+                        ConditionCode::a => a.jbe(skip_to)?,
+                        ConditionCode::l => a.jge(skip_to)?,
+                        ConditionCode::ge => a.jl(skip_to)?,
+                        ConditionCode::le => a.jg(skip_to)?,
+                        ConditionCode::g => a.jle(skip_to)?,
+                        ConditionCode::p => a.jnp(skip_to)?,
+                        ConditionCode::np => a.jp(skip_to)?,
+                        ConditionCode::o => a.jno(skip_to)?,
+                        ConditionCode::no => a.jo(skip_to)?,
+                        ConditionCode::s => a.jns(skip_to)?,
+                        ConditionCode::ns => a.js(skip_to)?,
+                        ConditionCode::None => a.jmp(skip_to)?,
+                    };
+
+                    // a.push(r10)?;
+                    // a.mov(r10, mem_displacement)?;
+                    // a.jmp(r10)?;
+                    // a.pop(r10)?;
+
+                    // JMP [RIP+0]
+                    a.db(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])?;
+                    a.dq(&[mem_displacement])?;
+
+                    a.set_label(&mut skip_to)?;
+                } else {
+                    a.add_instruction(instr)?;
+                }
+            } else {
+                a.add_instruction(instr)?;
+            }
         }
 
-        let additional_instructions: &[Instruction] = if add_jump {
-            let sym_addr_after_replaced = source_address.as_ptr() as u64 + relitive_eip as u64;
-            &[
-                Instruction::with_branch(Code::Jmp_rel32_64, sym_addr_after_replaced)?,
-                Instruction::with(Code::Nopd),
-            ]
-        } else {
-            &[]
-        };
-
-        for instr in additional_instructions {
-            relitive_eip += encoder.encode(&instr, (eip + relitive_eip) as u64)?;
+        if add_jump {
+            a.jmp(source_address.as_ptr() as u64)?;
+            a.nop()?;
         }
 
-        let buffer = encoder.take_buffer();
+        let buffer = self.assemble_instruction_block(eip, a.instructions())?;
 
-        Ok(buffer)
+        Ok(buffer.code_buffer)
     }
 }

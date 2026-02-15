@@ -6,7 +6,8 @@ use super::super::*;
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
-    MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAlloc, VirtualProtect,
+    MEM_COMMIT, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS,
+    PAGE_READWRITE, VirtualAlloc, VirtualProtect, VirtualQuery,
 };
 
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
@@ -16,14 +17,11 @@ use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 pub struct WindowsMemoryHandle(pub NonNull<c_void>);
 
 impl MemoryHandle for WindowsMemoryHandle {
+    fn from_ptr(ptr: NonNull<c_void>) -> Self {
+        Self(ptr)
+    }
     fn as_ptr(&self) -> NonNull<c_void> {
         self.0
-    }
-}
-
-impl WindowsMemoryHandle {
-    pub fn from_ptr(ptr: *mut c_void) -> Option<Self> {
-        NonNull::new(ptr).map(Self)
     }
 }
 
@@ -63,6 +61,7 @@ impl WindowsMemoryController {
         system_info
     }
 
+    #[cfg(feature = "win_close_alloc")]
     unsafe fn allocate_system_memory(
         &self,
         page_size: usize,
@@ -73,9 +72,8 @@ impl WindowsMemoryController {
         // So try and load some memory that is a bit closer
         let mut allocation_address = {
             fn dummy() {}
-            self.allign(page_size, dummy as *const c_void as usize) + page_size
+            self.allign_up(page_size, dummy as *const c_void as usize) + page_size
         };
-
         let handle = 'memaddr: {
             for _ in 0..0x1000 {
                 let addr = unsafe {
@@ -94,17 +92,45 @@ impl WindowsMemoryController {
             std::ptr::null_mut()
         };
 
-        WindowsMemoryHandle::from_ptr(handle).ok_or(MemoryError::CantAllocate)
+        NonNull::new(handle)
+            .map(WindowsMemoryHandle)
+            .ok_or(MemoryError::CantAllocate)
     }
 
-    fn allign(&self, page_size: usize, address: usize) -> usize {
+    #[cfg(not(feature = "win_close_alloc"))]
+    unsafe fn allocate_system_memory(
+        &self,
+        _page_size: usize,
+        size: usize,
+    ) -> Result<WindowsMemoryHandle> {
+        let handle = unsafe {
+            VirtualAlloc(
+                std::ptr::null_mut(),
+                size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            )
+        };
+
+        NonNull::new(handle)
+            .map(WindowsMemoryHandle)
+            .ok_or(MemoryError::CantAllocate)
+    }
+
+    fn allign_up(&self, page_size: usize, address: usize) -> usize {
         (address as usize + page_size - 1) & !(page_size - 1)
     }
+
+    fn allign_down(&self, page_size: usize, address: usize) -> usize {
+        address & !(page_size - 1)
+    }
+
     fn get_native_protection_flags(&self, protection: MemoryProtection) -> u32 {
         match protection {
             MemoryProtection::NoAccess => 0,
             MemoryProtection::ReadWrite => PAGE_READWRITE,
             MemoryProtection::ReadExecute => PAGE_EXECUTE_READ,
+            MemoryProtection::Other(proc) => proc as u32,
         }
     }
 
@@ -129,6 +155,24 @@ impl WindowsMemoryController {
             Ok(())
         }
     }
+
+    unsafe fn get_page_info(&self, ptr: *const c_void) -> Result<MEMORY_BASIC_INFORMATION> {
+        let memory_info = unsafe {
+            let mut memory_info = MaybeUninit::<MEMORY_BASIC_INFORMATION>::uninit();
+            let res = VirtualQuery(
+                ptr,
+                memory_info.as_mut_ptr(),
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            );
+            if res == 0 {
+                None
+            } else {
+                Some(memory_info.assume_init())
+            }
+        };
+
+        memory_info.ok_or(MemoryError::BadAdress(ptr))
+    }
 }
 
 impl MemoryController for WindowsMemoryController {
@@ -140,7 +184,7 @@ impl MemoryController for WindowsMemoryController {
         let page_size = unsafe { self.get_system_info().dwPageSize } as usize;
 
         let allocation_size = if let Some(min_size) = min_size {
-            self.allign(page_size, min_size)
+            self.allign_up(page_size, min_size)
         } else {
             page_size
         };
@@ -201,5 +245,35 @@ impl MemoryController for WindowsMemoryController {
         };
 
         Ok(proc_address)
+    }
+
+    fn protection_guard_for_page<'a>(
+        &'a self,
+        ptr: NonNull<c_void>,
+        on_enter: MemoryProtection,
+        on_exit: Option<MemoryProtection>,
+    ) -> Result<MemoryProtectionGuard<'a, Self>>
+    where
+        Self: Sized,
+    {
+        let on_exit = if let Some(on_exit) = on_exit {
+            on_exit
+        } else {
+            let memory_info = unsafe { self.get_page_info(ptr.as_ptr())? };
+            MemoryProtection::Other(memory_info.Protect as usize)
+        };
+
+        let page_size = unsafe { self.get_system_info() }.dwPageSize as usize;
+        let alligned_address = {
+            let address =
+                self.allign_down(page_size as usize, ptr.as_ptr() as usize) as *mut c_void;
+            NonNull::new(address).ok_or(MemoryError::BadAdress(address))?
+        };
+        self.protection_guard(
+            Self::Handle::from_ptr(alligned_address),
+            page_size,
+            on_enter,
+            on_exit,
+        )
     }
 }
