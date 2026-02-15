@@ -7,9 +7,9 @@ use libc;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
-pub struct WindowsMemoryHandle(pub NonNull<c_void>);
+pub struct LinuxMemoryHandle(pub NonNull<c_void>);
 
-impl MemoryHandle for WindowsMemoryHandle {
+impl MemoryHandle for LinuxMemoryHandle {
     fn from_ptr(ptr: NonNull<c_void>) -> Self {
         Self(ptr)
     }
@@ -21,7 +21,7 @@ impl MemoryHandle for WindowsMemoryHandle {
 pub struct LinuxMemoryAllocationInfo {
     page_size: usize,
     allocation_size: usize,
-    allocation_start: WindowsMemoryHandle,
+    allocation_start: LinuxMemoryHandle,
 }
 
 impl AllocationInfo<LinuxMemoryController> for LinuxMemoryAllocationInfo {
@@ -33,7 +33,7 @@ impl AllocationInfo<LinuxMemoryController> for LinuxMemoryAllocationInfo {
         self.allocation_size
     }
 
-    fn allocation_start(&self) -> WindowsMemoryHandle {
+    fn allocation_start(&self) -> LinuxMemoryHandle {
         self.allocation_start
     }
 }
@@ -49,12 +49,11 @@ impl LinuxMemoryController {
         unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
     }
 
-    #[cfg(not(feature = "win_close_alloc"))]
     unsafe fn allocate_system_memory(
         &self,
         _page_size: usize,
         size: usize,
-    ) -> Result<WindowsMemoryHandle> {
+    ) -> Result<LinuxMemoryHandle> {
         let handle = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -67,7 +66,7 @@ impl LinuxMemoryController {
         };
 
         NonNull::new(handle)
-            .map(WindowsMemoryHandle)
+            .map(LinuxMemoryHandle)
             .ok_or(MemoryError::CantAllocate)
     }
 
@@ -104,7 +103,7 @@ impl LinuxMemoryController {
 }
 
 impl MemoryController for LinuxMemoryController {
-    type Handle = WindowsMemoryHandle;
+    type Handle = LinuxMemoryHandle;
 
     type AllocationInfoType = LinuxMemoryAllocationInfo;
 
