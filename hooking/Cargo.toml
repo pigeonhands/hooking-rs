@@ -18,15 +18,19 @@ iced-x86 = { version = "1.21.0", default-features = false, features = [
     "encoder",
     "block_encoder",
     "code_asm",
-    "instr_info"
+    "instr_info",
 ] }
 thiserror = "2.0.18"
 
 [target.'cfg(windows)'.profile.dev]
 split-debuginfo = "packed" # Or "off" to keep it all in the binary
 
-[target.'cfg(linux)'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.182"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = [ "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61.2", features = [
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader",
+] }

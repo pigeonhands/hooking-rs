@@ -77,11 +77,11 @@ impl HookAssembler for HookAssemblerx86_64 {
         &self,
         eip: usize,
         source_address: NonNull<c_void>,
-        min_size_bytes: usize,
+        patch_size: usize,
         add_jump: bool,
     ) -> Result<Vec<u8>> {
         let target_fn_data = unsafe {
-            core::slice::from_raw_parts(source_address.as_ptr() as *const u8, min_size_bytes + 20)
+            core::slice::from_raw_parts(source_address.as_ptr() as *const u8, patch_size + 20)
         };
 
         let mut a = CodeAssembler::new(self.bitness())?;
@@ -94,7 +94,7 @@ impl HookAssembler for HookAssemblerx86_64 {
         );
 
         let mut instruction_size_read = 0;
-        while instruction_size_read < min_size_bytes {
+        while instruction_size_read < patch_size {
             if !decoder.can_decode() {
                 return Err(AssemblyError::RelocationError);
             }
@@ -177,7 +177,7 @@ impl HookAssembler for HookAssemblerx86_64 {
         }
 
         if add_jump {
-            a.jmp(source_address.as_ptr() as u64)?;
+            a.jmp((source_address.as_ptr() as usize + patch_size) as u64)?;
             a.nop()?;
         }
 
