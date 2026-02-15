@@ -1,6 +1,6 @@
 use iced_x86::{
-    BlockEncoder, BlockEncoderResult, Code, ConditionCode, Decoder, DecoderOptions, Encoder,
-    Instruction, InstructionBlock, MemoryOperand, OpKind, Register, code_asm::*,
+    BlockEncoder, BlockEncoderResult, Code, ConditionCode, Decoder, DecoderOptions, Instruction,
+    InstructionBlock, MemoryOperand, Register, code_asm::*,
 };
 use std::{ffi::c_void, ptr::NonNull};
 
@@ -29,7 +29,7 @@ impl HookAssemblerx86_64 {
         eip: usize,
         instructions: &[Instruction],
     ) -> Result<BlockEncoderResult> {
-        let block = InstructionBlock::new(&instructions, eip as u64);
+        let block = InstructionBlock::new(instructions, eip as u64);
         let result = BlockEncoder::encode(self.bitness(), block, 0)?;
         Ok(result)
     }

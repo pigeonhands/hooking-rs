@@ -11,7 +11,7 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-unsafe extern "C" fn hook(
+unsafe extern "C" fn hook_destination(
     _: *mut std::ffi::c_void,
     lp_text: *const i8,
     lp_caption: *const i8,
@@ -35,8 +35,14 @@ unsafe extern "C" fn hook(
 }
 
 fn main() {
-    let mut hook =
-        unsafe { Hook::by_name(Some(c"user32.dll"), c"MessageBoxA", hook as *mut _).unwrap() };
+    let mut hook = unsafe {
+        Hook::by_name(
+            Some(c"user32.dll"),
+            c"MessageBoxA",
+            hook_destination as *mut _,
+        )
+        .unwrap()
+    };
 
     println!("Applying hook");
     hook.apply_hook().unwrap();

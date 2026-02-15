@@ -1,13 +1,13 @@
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 
 use super::super::*;
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
-    MEM_COMMIT, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS,
-    PAGE_READWRITE, VirtualAlloc, VirtualProtect, VirtualQuery,
+    MEM_COMMIT, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_READWRITE,
+    VirtualAlloc, VirtualProtect, VirtualQuery,
 };
 
 use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
@@ -53,12 +53,11 @@ impl WindowsMemoryController {
     }
 
     unsafe fn get_system_info(&self) -> SYSTEM_INFO {
-        let system_info = unsafe {
+        unsafe {
             let mut system_info = MaybeUninit::<SYSTEM_INFO>::uninit();
             GetSystemInfo(system_info.as_mut_ptr());
             system_info.assume_init()
-        };
-        system_info
+        }
     }
 
     #[cfg(feature = "win_close_alloc")]
@@ -118,7 +117,7 @@ impl WindowsMemoryController {
     }
 
     fn allign_up(&self, page_size: usize, address: usize) -> usize {
-        (address as usize + page_size - 1) & !(page_size - 1)
+        (address + page_size - 1) & !(page_size - 1)
     }
 
     fn allign_down(&self, page_size: usize, address: usize) -> usize {
@@ -235,8 +234,7 @@ impl MemoryController for WindowsMemoryController {
 
             proc_address
                 .map(|proc| proc as *mut c_void)
-                .map(NonNull::new)
-                .flatten()
+                .and_then(NonNull::new)
                 .ok_or_else(|| {
                     MemoryError::CantFindModule(
                         symbol.to_str().unwrap_or("<invalid-module-name>").into(),

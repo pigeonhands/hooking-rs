@@ -1,12 +1,10 @@
-use std::{arch::asm, ffi::CStr};
+pub use hooking::{HookData, HookWriter};
+pub use std::{arch::asm, ffi::CStr};
 
-use hooking::{HookData, HookWriter};
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" fn hook(s: *const libc::c_char) {
+unsafe extern "C" fn hook(s: *const i8) {
     let param_s = unsafe { CStr::from_ptr(s) };
 
-    let original_puts: extern "C" fn(*const libc::c_char) =
+    let original_puts: extern "C" fn(*const i8) =
         unsafe { std::mem::transmute(hooking::original_function_ptr().as_ptr()) };
 
     println!(
@@ -17,12 +15,11 @@ unsafe extern "C" fn hook(s: *const libc::c_char) {
     original_puts(c"Call original puts restore detour".as_ptr());
 }
 
-#[cfg(target_os = "linux")]
 fn main() {
     let hook_writer = HookWriter::from_static();
     let hook = unsafe {
         hook_writer
-            .create_hook(Some(c"libc"), c"puts", hook as *mut u8)
+            .create_hook_by_name(Some(c"libc"), c"puts", hook as *mut u8)
             .unwrap()
     };
 
@@ -39,6 +36,7 @@ fn main() {
         }
     }
 
+    #[cfg(target_os = "linux")]
     unsafe {
         libc::puts(c"Not hooked".as_ptr());
     }
