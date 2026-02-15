@@ -63,6 +63,16 @@ impl HookAssembler for HookAssemblerx86_64 {
         Ok(assembled.code_buffer)
     }
 
+    fn assemble_patch(&self, eip: usize, destination_fn: NonNull<c_void>) -> Result<Vec<u8>> {
+        let instructions = &[Instruction::with_branch(
+            Code::Jmp_rel32_64,
+            destination_fn.as_ptr() as u64,
+        )?];
+
+        let assembled = self.assemble_instruction_block(eip, instructions)?;
+        Ok(assembled.code_buffer)
+    }
+
     fn relocate_instructions(
         &self,
         eip: usize,

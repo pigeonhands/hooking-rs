@@ -22,6 +22,7 @@ pub struct HookData<'a, M: MemoryController> {
     pub symbol_address: NonNull<ffi::c_void>,
     pub trampoline_data: &'a [u8],
     pub restore_stub_data: &'a [u8],
+    pub patch_data: Vec<u8>,
     mem: &'a M,
 }
 
@@ -93,10 +94,14 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
             )
         };
 
+        let patch = self
+            .asm
+            .assemble_patch(sym_addr.as_ptr() as usize, trampoline_address)?;
+
         let (restore_stub_address, restore_stub_size) = {
-            let restore_stub =
-                self.asm
-                    .relocate_instructions(eip, sym_addr, trampoline_size, true)?;
+            let restore_stub = self
+                .asm
+                .relocate_instructions(eip, sym_addr, patch.len(), true)?;
 
             //eip += restore_stub.len();
             (
@@ -113,6 +118,7 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
         Ok(HookData {
             mem: &self.hook_heap.mem,
             symbol_address: sym_addr,
+            patch_data: patch,
             trampoline_data: unsafe {
                 core::slice::from_raw_parts(
                     trampoline_address.as_ptr() as *const _,

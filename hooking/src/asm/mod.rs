@@ -19,7 +19,7 @@ pub trait HookAssembler {
         destination_fn: NonNull<c_void>,
         restore_fn_address: Option<NonNull<c_void>>,
     ) -> Result<Vec<u8>>;
-
+    fn assemble_patch(&self, eip: usize, destination_fn: NonNull<c_void>) -> Result<Vec<u8>>;
     fn relocate_instructions(
         &self,
         eip: usize,
