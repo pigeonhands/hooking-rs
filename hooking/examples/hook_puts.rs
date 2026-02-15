@@ -2,6 +2,7 @@ use std::{arch::asm, ffi::CStr};
 
 use hooking::{HookData, HookWriter};
 
+#[cfg(target_os = "linux")]
 unsafe extern "C" fn hook(s: *const libc::c_char) {
     let param_s = unsafe { CStr::from_ptr(s) };
 
@@ -16,11 +17,12 @@ unsafe extern "C" fn hook(s: *const libc::c_char) {
     original_puts(c"Call original puts restore detour".as_ptr());
 }
 
+#[cfg(target_os = "linux")]
 fn main() {
     let hook_writer = HookWriter::from_static();
     let hook = unsafe {
         hook_writer
-            .write_hook(None, c"puts", hook as *mut u8)
+            .create_hook(Some(c"libc"), c"puts", hook as *mut u8)
             .unwrap()
     };
 

@@ -1,7 +1,7 @@
-#![no_std]
-mod hooks;
-mod mem;
-mod table;
+pub mod asm;
+pub mod error;
+pub mod hooks;
+pub mod mem;
 
 pub use hooks::{Hook, HookData, HookWriter};
 

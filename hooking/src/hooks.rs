@@ -1,222 +1,130 @@
 use core::ffi;
 use core::{ffi::CStr, ptr::NonNull};
-use iced_x86::{
-    BlockEncoder, BlockEncoderResult, Code, Decoder, DecoderOptions, Encoder, Instruction,
-    InstructionBlock, MemoryOperand, Register,
-};
+use std::ffi::c_void;
 
-use crate::mem::ExecWriteGuard;
-use crate::table::{HookHeap, HookHeapWriter};
+use crate::asm::{DefaultHookAssembler, HookAssembler};
+use crate::error::{HookingError, Result};
+use crate::mem::{DefaultMemoryController, HookHeap, MemoryController};
 
-static HOOK_HEAP: HookHeap = HookHeap::new();
+static HOOK_HEAP: HookHeap<DefaultMemoryController> = HookHeap::new();
 
 #[derive(Debug)]
-pub struct Hook<'a> {
-    pub data: HookData<'a>,
+pub struct Hook<'a, M: MemoryController = DefaultMemoryController> {
+    pub data: HookData<'a, M>,
 }
 
-impl<'a> Hook<'a> {
+impl<'a, M: MemoryController> Hook<'a, M> {
     pub fn apply_hook(&mut self) {}
 }
 
 #[derive(Debug)]
-pub struct HookData<'a> {
+pub struct HookData<'a, M: MemoryController> {
     pub symbol_address: NonNull<ffi::c_void>,
     pub trampoline_data: &'a [u8],
-    pub restore_data: &'a [u8],
+    pub restore_stub_data: &'a [u8],
+    mem: &'a M,
 }
 
-pub struct HookWriter<'a> {
-    hook_heap: &'a HookHeap,
+pub struct HookWriter<'a, M: MemoryController, A: HookAssembler> {
+    hook_heap: &'a HookHeap<M>,
+    asm: A,
 }
 
-impl<'a> HookWriter<'a> {
-    pub const fn new(hook_heap: &'a HookHeap) -> Self {
-        Self { hook_heap }
-    }
+impl HookWriter<'static, DefaultMemoryController, DefaultHookAssembler> {
     pub const fn from_static() -> Self {
-        Self::new(&HOOK_HEAP)
+        Self::new(&HOOK_HEAP, DefaultHookAssembler::new())
+    }
+}
+
+impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
+    pub const fn new(hook_heap: &'a HookHeap<M>, assembler: A) -> Self {
+        Self {
+            hook_heap,
+            asm: assembler,
+        }
     }
 
-    fn bitness(&self) -> u32 {
-        #[cfg(target_pointer_width = "64")]
-        let bitness = 64;
-
-        #[cfg(target_pointer_width = "32")]
-        let bitness = 32;
-
-        bitness
-    }
-
-    pub unsafe fn write_hook(
+    pub unsafe fn create_hook_by_name(
         &self,
         module: Option<&CStr>,
         symbol: &CStr,
         destination: *mut u8,
-    ) -> Result<Hook<'a>, ()> {
-        let destination_fn = NonNull::new(destination as *mut ffi::c_void).ok_or(())?;
+    ) -> Result<Hook<'a, M>> {
+        let destination = NonNull::new(destination as *mut c_void).ok_or_else(|| {
+            HookingError::NoDestination(symbol.to_str().unwrap_or("<invalid-symbol-name>").into())
+        })?;
 
-        let module_handle = if let Some(module_name) = module {
-            ModuleHandle::from_name(module_name).ok_or(())?
-        } else {
-            ModuleHandle::none()
-        };
-
-        let sym_addr =
-            NonNull::new(unsafe { libc::dlsym(module_handle.handle(), symbol.as_ptr()) })
-                .ok_or(())?;
-
-        unsafe { self.write_hook_fn_ptr(sym_addr, destination_fn) }
-    }
-    pub unsafe fn write_hook_fn_ptr(
-        &self,
-        target: NonNull<ffi::c_void>,
-        destination: NonNull<ffi::c_void>,
-    ) -> Result<Hook<'a>, ()> {
-        let data = unsafe { self.write_hook_table(target, destination)? };
-        Ok(Hook { data })
+        unsafe {
+            let symbol_address = self.hook_heap.mem.get_symbol_address(module, symbol)?;
+            self.create_hook(symbol_address, destination)
+        }
     }
 
-    fn write_instructions(
+    pub unsafe fn create_hook(
         &self,
-        eip: usize,
-        instructions: &[Instruction],
-    ) -> Result<BlockEncoderResult, ()> {
-        let block = InstructionBlock::new(&instructions, eip as u64);
-        let result = BlockEncoder::encode(self.bitness(), block, 0).unwrap();
-        Ok(result)
+        target: NonNull<c_void>,
+        destination: NonNull<c_void>,
+    ) -> Result<Hook<'a, M>> {
+        let hook_data = unsafe { self.write_hook_table(target, destination)? };
+        Ok(Hook { data: hook_data })
     }
 
     pub unsafe fn write_hook_table(
         &self,
         sym_addr: NonNull<ffi::c_void>,
         destination_fn: NonNull<ffi::c_void>,
-    ) -> Result<HookData<'a>, ()> {
-        let mut write_lock = self.hook_heap.start_write();
-        let _write_guard = write_lock.make_heap_writable()?;
+    ) -> Result<HookData<'a, M>> {
+        let mut heap_handle = self.hook_heap.get_handle()?;
+        let mut write_handle = heap_handle.begin_write()?;
 
-        write_lock.allocate_heap();
+        let restore_fn_address = unsafe { write_handle.reserve(std::mem::size_of::<usize>())? };
+        let mut eip = unsafe { write_handle.write_address()? }.as_ptr() as usize;
 
-        let restore_fn_ptr =
-            write_lock.write_bytes(&(0xaaaaaaaaaaaaaaaa as usize).to_be_bytes())?;
+        let (trampoline_address, trampoline_size) = {
+            let trampoline =
+                self.asm
+                    .assemble_trampoline(eip, destination_fn, Some(restore_fn_address))?;
 
-        let mut rip = write_lock.current_address()? as usize;
+            eip += trampoline.len();
 
-        let (trampoline_addr, trampoline_size) = {
-            let result = self.write_instructions(
-                rip,
-                &[
-                    Instruction::with2(
-                        Code::Mov_r64_rm64,
-                        Register::R10,
-                        MemoryOperand::with_base_displ(
-                            Register::RIP,
-                            restore_fn_ptr.as_ptr() as i64,
-                        ),
-                    )
-                    .map_err(|_| ())?,
-                    Instruction::with_branch(Code::Jmp_rel32_64, destination_fn.as_ptr() as u64)
-                        .map_err(|_| ())?,
-                    Instruction::with(Code::Nopd),
-                ],
-            )?;
-
-            let code_addr = write_lock.write_bytes(&result.code_buffer)?;
-            let code_size = result.code_buffer.len() as usize;
-
-            rip += code_size;
-            (code_addr, code_size)
+            (
+                unsafe { write_handle.write_bytes(&trampoline)? },
+                trampoline.len(),
+            )
         };
 
-        let (restore_hook_addr, restore_hook_size) = {
-            let mut encoder = Encoder::new(self.bitness());
+        let (restore_stub_address, restore_stub_size) = {
+            let restore_stub =
+                self.asm
+                    .relocate_instructions(eip, sym_addr, trampoline_size, true)?;
 
-            let target_fn_data = unsafe {
-                core::slice::from_raw_parts(sym_addr.as_ptr() as *const u8, trampoline_size + 15)
-            };
-
-            let mut decoder =
-                Decoder::with_ip(64, target_fn_data, rip as u64, DecoderOptions::NONE);
-
-            let mut instructions_read = 0;
-
-            while instructions_read < trampoline_size {
-                if !decoder.can_decode() {
-                    return Err(());
-                }
-                let instr = decoder.decode();
-                let encoded = encoder.encode(&instr, rip as u64).map_err(|_| ())?;
-                rip += encoded;
-                instructions_read += encoded;
-            }
-
-            let sym_addr_after_replaced = sym_addr.as_ptr() as u64 + instructions_read as u64;
-            let additional_instructions = [
-                Instruction::with_branch(Code::Jmp_rel32_64, sym_addr_after_replaced)
-                    .map_err(|_| ())?,
-                Instruction::with(Code::Nopd),
-            ];
-
-            for instr in &additional_instructions {
-                encoder.encode(&instr, rip as u64).map_err(|_| ())?;
-                rip += instr.len();
-            }
-
-            let buffer = encoder.take_buffer();
-
-            let code_addr = write_lock.write_bytes(&buffer)?;
-            let code_size = buffer.len() as usize;
-
-            (code_addr, code_size)
+            //eip += restore_stub.len();
+            (
+                unsafe { write_handle.write_bytes(&restore_stub)? },
+                restore_stub.len(),
+            )
         };
 
         unsafe {
-            let write_restore_addr: usize = restore_hook_addr.as_ptr() as usize;
-            restore_fn_ptr.cast().write(write_restore_addr);
-            //     core::ptr::copy_nonoverlapping(
-            //         restore_hook_addr.as_ptr(),
-            //         restore_fn_ptr.as_ptr(),
-            //         core::mem::size_of::<usize>(),
-            //     );
+            let write_restore_addr: usize = restore_stub_address.as_ptr() as usize;
+            restore_fn_address.cast().write(write_restore_addr);
         }
 
         Ok(HookData {
+            mem: &self.hook_heap.mem,
             symbol_address: sym_addr,
             trampoline_data: unsafe {
-                core::slice::from_raw_parts(trampoline_addr.as_ptr() as *const _, trampoline_size)
-            },
-            restore_data: unsafe {
                 core::slice::from_raw_parts(
-                    restore_hook_addr.as_ptr() as *const _,
-                    restore_hook_size,
+                    trampoline_address.as_ptr() as *const _,
+                    trampoline_size,
+                )
+            },
+            restore_stub_data: unsafe {
+                core::slice::from_raw_parts(
+                    restore_stub_address.as_ptr() as *const _,
+                    restore_stub_size,
                 )
             },
         })
-    }
-}
-#[derive(Debug, Clone)]
-enum ModuleHandle {
-    None,
-    Libc(NonNull<ffi::c_void>),
-}
-
-impl ModuleHandle {
-    pub fn none() -> Self {
-        Self::None
-    }
-    pub fn from_name(module_name: &CStr) -> Option<Self> {
-        let handle = unsafe { libc::dlopen(module_name.as_ptr(), libc::RTLD_LAZY) };
-
-        if handle.is_null() {
-            None
-        } else {
-            NonNull::new(handle).map(Self::Libc)
-        }
-    }
-    pub fn handle(&self) -> *mut ffi::c_void {
-        match self {
-            Self::None => libc::RTLD_DEFAULT as *mut ffi::c_void,
-            Self::Libc(handle) => handle.as_ptr(),
-        }
     }
 }
