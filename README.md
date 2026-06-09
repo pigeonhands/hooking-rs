@@ -54,7 +54,7 @@ unsafe extern "C" fn hook_destination(
 }
 
 unsafe {
-    unsafe { hook::enable_hook(hook_destination as *mut _); }
+    unsafe { hook_destination::enable_hook(); }
 }
 
 ```

@@ -7,10 +7,9 @@ cfg_select! {
     feature = "macros" => {
         mod macros;
 
-        pub use macros::{enable_hook, disable_hook, get_hook};
         pub use hooking_macros::hook;
         pub mod __macro_support {
-            pub use super::macros::create_hook;
+            pub use super::macros::*;
         }
     }
     _ => {}

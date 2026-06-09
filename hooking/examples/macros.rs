@@ -19,14 +19,14 @@ unsafe extern "C" fn hooked_puts(s: *const i8) -> c_int {
 }
 
 fn main() {
-    unsafe { hooking::enable_hook(hooked_puts as *mut u8).unwrap() }
+    unsafe { hooked_puts::enable_hook().unwrap() };
 
     #[cfg(target_os = "linux")]
     unsafe {
         libc::puts(c"Am i hooked?".as_ptr());
     }
 
-    unsafe { hooking::disable_hook(hooked_puts as *mut u8).unwrap() }
+    unsafe { hooked_puts::disable_hook().unwrap() };
 
     #[cfg(target_os = "linux")]
     unsafe {

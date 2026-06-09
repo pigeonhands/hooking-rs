@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use super::super::*;

@@ -5,7 +5,7 @@ use darling::FromMeta;
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
 use quote::quote;
-use syn::{ItemFn, LitStr, parse_macro_input};
+use syn::{ItemFn, parse_macro_input};
 
 #[derive(FromMeta)]
 #[darling(derive_syn_parse)]
@@ -24,6 +24,7 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let func = parse_macro_input!(item as ItemFn);
+    let vis = &func.vis;
 
     let func_name = &func.sig.ident;
     let ctor_name = quote::format_ident!("__hook_register_{}", func_name);
@@ -36,15 +37,38 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None }
     };
 
-    quote! {
+    let macro_out = quote! {
         #func
 
-        #[::ctor::ctor(unsafe)]
-        fn #ctor_name() {
-            let ptr = #func_name as *mut u8;
+        #vis mod #func_name {
+            use ::hooking::error::Result;
+            use ::hooking::__macro_support;
 
-            ::hooking::__macro_support::create_hook(#target_lib, #target_method, ptr);
+            static __HOOK: __macro_support::StaticHook = __macro_support::StaticHook::new();
+
+            pub unsafe fn enable_hook() -> Result<()> {
+                unsafe {__macro_support::enable_hook(&__HOOK) }
+            }
+
+            pub unsafe fn disable_hook() -> Result<()> {
+                unsafe { __macro_support::disable_hook(&__HOOK) }
+            }
+
+            pub fn get_hook() -> Result<__macro_support::StaticHookGuard> {
+                unsafe { __macro_support::get_hook(&__HOOK) }
+            }
+
+
+            #[::ctor::ctor(unsafe)]
+            fn #ctor_name() {
+                let ptr = super::#func_name as *mut u8;
+
+                unsafe { ::hooking::__macro_support::init_hook(&__HOOK, #target_lib, #target_method, ptr) };
+            }
         }
-    }
-    .into()
+
+
+    };
+
+    macro_out.into()
 }

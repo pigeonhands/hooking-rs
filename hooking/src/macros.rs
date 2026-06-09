@@ -1,14 +1,15 @@
-use std::ffi::c_void;
-use std::ops::{Deref, DerefMut};
-use std::{ffi::CStr, sync::LazyLock};
-
-use dashmap::DashMap;
-use dashmap::mapref::one::RefMut;
-
 use crate::Hook;
 use crate::error::{HookingError, Result};
+use std::ffi::CStr;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
+#[derive(Debug)]
+#[repr(transparent)]
 pub struct MacroHook(Hook<'static>);
+
+unsafe impl Send for MacroHook {}
+unsafe impl Sync for MacroHook {}
 impl DerefMut for MacroHook {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -23,37 +24,43 @@ impl Deref for MacroHook {
     }
 }
 
-unsafe impl Send for MacroHook {}
-unsafe impl Sync for MacroHook {}
+pub type StaticHook = OnceLock<Mutex<MacroHook>>;
+pub type StaticHookGuard = MutexGuard<'static, MacroHook>;
 
-static HOOK_MAP: LazyLock<DashMap<usize, MacroHook>> = LazyLock::new(DashMap::new);
+pub unsafe fn init_hook(
+    static_hook: &StaticHook,
+    module: Option<&CStr>,
+    symbol: &CStr,
+    destination: *mut u8,
+) {
+    let hook = unsafe { Hook::by_name(module, symbol, destination).unwrap() };
 
-pub fn create_hook(module: Option<&CStr>, symbol: &CStr, destination: *mut u8) {
-    let hook = MacroHook(unsafe { Hook::by_name(module, symbol, destination).unwrap() });
-    let addr = destination as usize;
-    HOOK_MAP.insert(addr, hook);
+    static_hook.set(Mutex::new(MacroHook(hook))).unwrap();
 }
-pub unsafe fn enable_hook(destination: *mut u8) -> Result<()> {
-    let addr = destination as usize;
-    let mut hook = HOOK_MAP
-        .get_mut(&addr)
-        .ok_or_else(|| HookingError::NotHooked(destination as *const c_void))?;
+pub unsafe fn enable_hook(static_hook: &StaticHook) -> Result<()> {
+    let mut hook = static_hook
+        .get()
+        .ok_or_else(|| HookingError::NotHooked)?
+        .lock()
+        .unwrap();
 
-    unsafe { hook.0.apply_hook() }
+    unsafe { hook.apply_hook() }
 }
-pub unsafe fn disable_hook(destination: *mut u8) -> Result<()> {
-    let addr = destination as usize;
-    let mut hook = HOOK_MAP
-        .get_mut(&addr)
-        .ok_or_else(|| HookingError::NotHooked(destination as *const c_void))?;
+pub unsafe fn disable_hook(static_hook: &StaticHook) -> Result<()> {
+    let mut hook = static_hook
+        .get()
+        .ok_or_else(|| HookingError::NotHooked)?
+        .lock()
+        .unwrap();
 
-    unsafe { hook.0.remove_hook() }
+    unsafe { hook.remove_hook() }
 }
+pub unsafe fn get_hook(static_hook: &'static StaticHook) -> Result<StaticHookGuard> {
+    let hook = static_hook
+        .get()
+        .ok_or_else(|| HookingError::NotHooked)?
+        .lock()
+        .unwrap();
 
-pub unsafe fn get_hook(destination: *mut u8) -> Result<RefMut<'static, usize, MacroHook>> {
-    let addr = destination as usize;
-    let hook = HOOK_MAP
-        .get_mut(&addr)
-        .ok_or_else(|| HookingError::NotHooked(destination as *const c_void))?;
     Ok(hook)
 }
