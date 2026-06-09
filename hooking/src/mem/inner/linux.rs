@@ -38,6 +38,7 @@ impl AllocationInfo<LinuxMemoryController> for LinuxMemoryAllocationInfo {
     }
 }
 
+#[derive(Debug)]
 pub struct LinuxMemoryController;
 
 impl LinuxMemoryController {

@@ -3,6 +3,19 @@ pub mod error;
 pub mod hooks;
 pub mod mem;
 
+cfg_select! {
+    feature = "macros" => {
+        mod macros;
+
+        pub use macros::{enable_hook, disable_hook, get_hook};
+        pub use hooking_macros::hook;
+        pub mod __macro_support {
+            pub use super::macros::create_hook;
+        }
+    }
+    _ => {}
+}
+
 pub use hooks::{Hook, HookData, HookWriter};
 
 pub fn original_function_ptr() -> core::ptr::NonNull<core::ffi::c_void> {

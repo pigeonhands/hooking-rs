@@ -20,4 +20,7 @@ pub enum HookingError {
 
     #[error("Provided destination for hook {0:?} is invalid")]
     InvalidDestination(*const c_void),
+
+    #[error("Tried to enable hook that is not hooked {0:?}")]
+    NotHooked(*const c_void),
 }

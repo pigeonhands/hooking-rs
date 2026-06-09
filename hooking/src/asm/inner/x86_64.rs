@@ -177,7 +177,7 @@ impl HookAssembler for HookAssemblerx86_64 {
         }
 
         if add_jump {
-            a.jmp((source_address.as_ptr() as usize + patch_size) as u64)?;
+            a.jmp((source_address.as_ptr() as usize + instruction_size_read) as u64)?;
             a.nop()?;
         }
 

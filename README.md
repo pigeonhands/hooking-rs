@@ -33,7 +33,9 @@ Each function creates a stub in memory that consists of
 
 
 A simple hook:
+
 ```rust
+#[hook(lib = "user32.dll", method = "MessageBoxA")]
 unsafe extern "C" fn hook_destination(
     _: *mut std::ffi::c_void,
     lp_text: *const i8,
@@ -52,13 +54,7 @@ unsafe extern "C" fn hook_destination(
 }
 
 unsafe {
-    let mut hook = Hook::by_name(
-        Some(c"user32.dll"),
-        c"MessageBoxA",
-        hook_destination as *mut _,
-    ).unwrap();
-
-    hook.apply_hook().unwrap();
+    unsafe { hook::enable_hook(hook_destination as *mut _); }
 }
 
 ```

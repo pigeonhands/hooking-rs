@@ -1,6 +1,6 @@
 [package]
 name = "hooking"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 description = "hooking libs in rust"
@@ -8,7 +8,8 @@ readme = "../README.md"
 repository = "https://github.com/pigeonhands/hooking-rs"
 
 [features]
-default = []
+default = ["macros"]
+macros = [ "hooking_macros", "dashmap" ]
 win_close_alloc = []
 
 [dependencies]
@@ -21,6 +22,9 @@ iced-x86 = { version = "1.21.0", default-features = false, features = [
     "instr_info",
 ] }
 thiserror = "2.0.18"
+hooking_macros = { version = "0.3", path = "../hooking_macros/", optional = true}
+dashmap = { version =  "6.2.1", optional = true }
+ctor = "1.0.7"
 
 [target.'cfg(windows)'.profile.dev]
 split-debuginfo = "packed" # Or "off" to keep it all in the binary
