@@ -4,6 +4,8 @@ use iced_x86::{
 };
 use std::{ffi::c_void, ptr::NonNull};
 
+use crate::ORIGINAL_FN_CHECKSUM_MAGIC;
+
 use super::super::*;
 
 pub type InnerError = iced_x86::IcedError;
@@ -42,24 +44,33 @@ impl HookAssembler for HookAssemblerx86_64 {
         destination_fn: NonNull<c_void>,
         restore_fn_address: Option<NonNull<c_void>>,
     ) -> Result<Vec<u8>> {
-        let set_restore_fn_instructon = if let Some(restore_fn_address) = restore_fn_address {
-            Instruction::with2(
-                Code::Mov_r64_rm64,
-                Register::R10,
-                MemoryOperand::with_base_displ(Register::RIP, restore_fn_address.as_ptr() as i64),
-            )?
-        } else {
-            Instruction::new()
-            //Instruction::with(Code::Nopd)
+        let mut instructions = Vec::new();
+
+        if let Some(restore_fn_address) = restore_fn_address {
+            instructions.extend_from_slice(&[
+                Instruction::with2(
+                    Code::Mov_r64_rm64,
+                    Register::R10,
+                    MemoryOperand::with_base_displ(
+                        Register::RIP,
+                        restore_fn_address.as_ptr() as i64,
+                    ),
+                )?,
+                Instruction::with2(
+                    Code::Mov_r64_imm64,
+                    Register::R11,
+                    ORIGINAL_FN_CHECKSUM_MAGIC as u64,
+                )?,
+                Instruction::with2(Code::Xor_r64_rm64, Register::R11, Register::R10)?,
+            ]);
         };
 
-        let instructions = &[
-            set_restore_fn_instructon,
+        instructions.extend_from_slice(&[
             Instruction::with_branch(Code::Jmp_rel32_64, destination_fn.as_ptr() as u64)?,
             Instruction::with(Code::Nopd),
-        ];
+        ]);
 
-        let assembled = self.assemble_instruction_block(eip, instructions)?;
+        let assembled = self.assemble_instruction_block(eip, &instructions)?;
         Ok(assembled.code_buffer)
     }
 

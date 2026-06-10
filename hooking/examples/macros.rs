@@ -7,8 +7,13 @@ use libc::c_int;
 unsafe extern "C" fn hooked_puts(s: *const i8) -> c_int {
     let param_s = unsafe { CStr::from_ptr(s) };
 
-    let original_puts: extern "C" fn(*const i8) -> c_int =
-        unsafe { std::mem::transmute(hooking::original_function_ptr().as_ptr()) };
+    let original_puts: extern "C" fn(*const i8) -> c_int = unsafe {
+        std::mem::transmute(
+            hooking::original_function_ptr()
+                .expect("called from hook")
+                .as_ptr(),
+        )
+    };
 
     println!(
         "Hooked function param: {:?} | Original fn restore jump: {:?}",

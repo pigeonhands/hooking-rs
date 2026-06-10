@@ -17,8 +17,13 @@ unsafe extern "C" fn hook_destination(
     lp_caption: *const i8,
     _: u32,
 ) -> i32 {
-    let original_msgbox: extern "C" fn(*mut std::ffi::c_void, *const i8, *const i8, u32) -> i32 =
-        unsafe { std::mem::transmute(hooking::original_function_ptr().as_ptr()) };
+    let original_msgbox: extern "C" fn(*mut std::ffi::c_void, *const i8, *const i8, u32) -> i32 = unsafe {
+        std::mem::transmute(
+            hooking::original_function_ptr()
+                .expect("invoked from hook")
+                .as_ptr(),
+        )
+    };
 
     println!(
         "Called with title: {:?} | Body: {:?}",

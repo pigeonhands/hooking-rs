@@ -10,8 +10,13 @@ pub unsafe extern "C" fn add_two_numbers_together(a: i32, b: i32) -> i32 {
 }
 
 unsafe extern "C" fn hook(a: i32, b: i32) -> i32 {
-    let original_add: extern "C" fn(a: i32, b: i32) -> i32 =
-        unsafe { std::mem::transmute(hooking::original_function_ptr().as_ptr()) };
+    let original_add: extern "C" fn(a: i32, b: i32) -> i32 = unsafe {
+        std::mem::transmute(
+            hooking::original_function_ptr()
+                .expect("invoked from hook")
+                .as_ptr(),
+        )
+    };
 
     println!("Hooked with params: ({a}, {b})");
 

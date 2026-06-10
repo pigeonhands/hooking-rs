@@ -5,8 +5,13 @@ pub use std::{arch::asm, ffi::CStr};
 unsafe extern "C" fn hooked_puts(s: *const i8) {
     let param_s = unsafe { CStr::from_ptr(s) };
 
-    let original_puts: extern "C" fn(*const i8) =
-        unsafe { std::mem::transmute(hooking::original_function_ptr().as_ptr()) };
+    let original_puts: extern "C" fn(*const i8) = unsafe {
+        std::mem::transmute(
+            hooking::original_function_ptr()
+                .expect("invoked from hook")
+                .as_ptr(),
+        )
+    };
 
     println!(
         "Hooked function param: {:?} | Original fn restore jump: {:?}",
