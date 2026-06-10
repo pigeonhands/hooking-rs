@@ -37,14 +37,46 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None }
     };
 
+    let inputs: Vec<_> = func
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            syn::FnArg::Typed(pat_type) => &*pat_type.ty,
+            syn::FnArg::Receiver(_) => panic!("hook function cannot have self"),
+        })
+        .collect();
+
+    let output = &func.sig.output;
+    let abi = &func.sig.abi;
+
+    let fn_ptr_type = quote! {
+        #abi fn(#(#inputs),*) #output
+    };
+
     let macro_out = quote! {
         #func
+
 
         #vis mod #func_name {
             use ::hooking::error::Result;
             use ::hooking::__macro_support;
 
             static __HOOK: __macro_support::StaticHook = __macro_support::StaticHook::new();
+
+            pub type FunctionSignature = #fn_ptr_type;
+
+
+            /// This should be the first method called in the hook function
+            /// in orfer for it to function correctly.
+            ///
+            /// This will return None if not called from a function that was
+            /// invoked from a hook.
+            pub unsafe fn original_function() -> Option<FunctionSignature> {
+                ::hooking::original_function_ptr().map(|f| {
+                    std::mem::transmute(f.as_ptr())
+                })
+            }
 
             pub unsafe fn enable_hook() -> Result<()> {
                 unsafe {__macro_support::enable_hook(&__HOOK) }

@@ -42,13 +42,10 @@ unsafe extern "C" fn hook_destination(
     lp_caption: *const i8,
     _: u32,
 ) -> i32 {
-    let original_msgbox: extern "C" fn(*mut std::ffi::c_void, *const i8, *const i8, u32) -> i32  {
-            std::mem::transmute(
-                hooking::original_function_ptr()
-                    .expect("invoked from hook")
-                    .as_ptr(),
-            )
-        };
+    let original_msgbox = unsafe {
+        hook_destination::original_function()
+            .expect("hook_destination must be invoked from hook for original_function to work")
+    };
 
     original_msgbox(
         std::ptr::null_mut(),

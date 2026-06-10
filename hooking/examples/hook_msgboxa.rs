@@ -20,7 +20,7 @@ unsafe extern "C" fn hook_destination(
     let original_msgbox: extern "C" fn(*mut std::ffi::c_void, *const i8, *const i8, u32) -> i32 = unsafe {
         std::mem::transmute(
             hooking::original_function_ptr()
-                .expect("invoked from hook")
+                .expect("must be invoked from hook")
                 .as_ptr(),
         )
     };

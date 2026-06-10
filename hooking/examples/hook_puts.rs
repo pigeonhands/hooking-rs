@@ -8,7 +8,7 @@ unsafe extern "C" fn hooked_puts(s: *const i8) {
     let original_puts: extern "C" fn(*const i8) = unsafe {
         std::mem::transmute(
             hooking::original_function_ptr()
-                .expect("invoked from hook")
+                .expect("must be invoked from hook")
                 .as_ptr(),
         )
     };

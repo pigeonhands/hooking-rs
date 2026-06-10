@@ -13,7 +13,7 @@ unsafe extern "C" fn hook(a: i32, b: i32) -> i32 {
     let original_add: extern "C" fn(a: i32, b: i32) -> i32 = unsafe {
         std::mem::transmute(
             hooking::original_function_ptr()
-                .expect("invoked from hook")
+                .expect("must be invoked from hook")
                 .as_ptr(),
         )
     };

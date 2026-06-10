@@ -1,19 +1,15 @@
 use std::ffi::CStr;
 
 use hooking::{self, hook};
-use libc::c_int;
 
 #[hook(method = "puts")]
-unsafe extern "C" fn hooked_puts(s: *const i8) -> c_int {
-    let param_s = unsafe { CStr::from_ptr(s) };
-
-    let original_puts: extern "C" fn(*const i8) -> c_int = unsafe {
-        std::mem::transmute(
-            hooking::original_function_ptr()
-                .expect("called from hook")
-                .as_ptr(),
-        )
+unsafe extern "C" fn hooked_puts(s: *const i8) -> libc::c_int {
+    let original_puts = unsafe {
+        hooked_puts::original_function()
+            .expect("hooked_puts must be invoked from hook for original_function to work")
     };
+
+    let param_s = unsafe { CStr::from_ptr(s) };
 
     println!(
         "Hooked function param: {:?} | Original fn restore jump: {:?}",
