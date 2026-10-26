@@ -1,89 +1,94 @@
-#[cfg(target_os = "windows")]
-pub mod inner {
-    pub mod windows;
-    pub use windows::*;
-
-    pub use windows::WindowsMemoryController as MemoryController;
-}
-
-#[cfg(target_os = "linux")]
-pub mod inner {
-    pub mod linux;
-    pub use linux::*;
-
-    pub use linux::LinuxMemoryController as MemoryController;
-}
-
 pub mod error;
-pub mod page;
-pub mod table;
-use std::{
-    ffi::{CStr, c_void},
-    ptr::NonNull,
-};
+
+use std::ptr::NonNull;
 
 pub use error::{MemoryError, Result};
-pub use table::{HeapState, HookHeap, MemoryHeapHandle, MemoryWriteHandle};
 
-use crate::mem::page::MemoryProtectionGuard;
+use crate::sys;
 
-pub type DefaultMemoryController = inner::MemoryController;
-
-#[derive(Debug, Clone, Copy)]
-pub enum MemoryProtection {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
     NoAccess,
+    Read,
     ReadWrite,
     ReadExecute,
-    Other(usize),
+    ReadWriteExecute,
+    /// A platform specific protection value.
+    Native(usize),
 }
 
-pub trait MemoryHandle: Sized {
-    fn from_ptr(ptr: NonNull<c_void>) -> Self;
-    fn as_ptr(&self) -> NonNull<c_void>;
+/// Changes the protection of every page covering a byte range and restores
+/// each page's original protection when dropped.
+pub struct ProtectGuard {
+    page_size: usize,
+    original: Vec<(NonNull<u8>, Protection)>,
 }
 
-pub trait MemoryController {
-    type Handle: MemoryHandle + Copy + Clone;
-    type AllocationInfoType: AllocationInfo<Self>;
+impl ProtectGuard {
+    pub unsafe fn new(ptr: NonNull<u8>, len: usize, protection: Protection) -> Result<Self> {
+        let page_size = sys::page_size();
+        let (start, range_len) = sys::page_range(ptr.as_ptr() as usize, len);
 
-    unsafe fn get_symbol_address(
-        &self,
-        module: Option<&CStr>,
-        symbol: &CStr,
-    ) -> Result<NonNull<c_void>>;
-    unsafe fn allocate_memory(&self, min_size: Option<usize>) -> Result<Self::AllocationInfoType>;
-    unsafe fn set_page_protection(
-        &self,
-        handle: Self::Handle,
-        size: usize,
-        protection: MemoryProtection,
-    ) -> Result<()>;
+        let mut guard = Self {
+            page_size,
+            original: Vec::with_capacity(range_len / page_size),
+        };
 
-    fn protection_guard_for_page<'a>(
-        &'a self,
-        ptr: NonNull<c_void>,
-        on_enter: MemoryProtection,
-        on_exit: Option<MemoryProtection>,
-    ) -> Result<MemoryProtectionGuard<'a, Self>>
-    where
-        Self: Sized;
+        for page in (start..start + range_len).step_by(page_size) {
+            let page =
+                NonNull::new(page as *mut u8).ok_or(MemoryError::BadAdress(ptr.as_ptr().cast()))?;
+            let original = sys::query_protection(page)?;
+            unsafe { sys::protect(page, page_size, protection)? };
+            // Pushed only once changed, so a failure part way restores just these.
+            guard.original.push((page, original));
+        }
 
-    fn protection_guard<'a>(
-        &'a self,
-        memory_start: Self::Handle,
-        memory_size: usize,
-        on_enter: MemoryProtection,
-        on_exit: MemoryProtection,
-    ) -> Result<MemoryProtectionGuard<'a, Self>>
-    where
-        Self: Sized,
-    {
-        MemoryProtectionGuard::guard(self, on_enter, on_exit, memory_start, memory_size)
+        Ok(guard)
     }
 }
 
-pub trait AllocationInfo<C: MemoryController + ?Sized>: Sized {
-    fn page_size(&self) -> usize;
-    fn allocation_size(&self) -> usize;
-    fn allocation_start(&self) -> C::Handle;
+impl Drop for ProtectGuard {
+    fn drop(&mut self) {
+        for &(page, protection) in &self.original {
+            // Nothing useful can be done with a failure while dropping.
+            let _ = unsafe { sys::protect(page, self.page_size, protection) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_covers_page_crossing_range_and_restores() {
+        let page_size = sys::page_size();
+        let pages = unsafe { sys::alloc(2 * page_size, Protection::ReadExecute, None).unwrap() };
+        let second = unsafe { pages.add(page_size) };
+        unsafe { sys::protect(second, page_size, Protection::Read).unwrap() };
+
+        // Two bytes either side of the page boundary.
+        let ptr = unsafe { pages.add(page_size - 2) };
+        {
+            let _guard =
+                unsafe { ProtectGuard::new(ptr, 4, Protection::ReadWriteExecute).unwrap() };
+            assert_eq!(
+                sys::query_protection(pages).unwrap(),
+                Protection::ReadWriteExecute
+            );
+            assert_eq!(
+                sys::query_protection(second).unwrap(),
+                Protection::ReadWriteExecute
+            );
+            unsafe { ptr.as_ptr().write_bytes(0xCC, 4) };
+        }
+
+        // Each page gets its own original protection back.
+        assert_eq!(
+            sys::query_protection(pages).unwrap(),
+            Protection::ReadExecute
+        );
+        assert_eq!(sys::query_protection(second).unwrap(), Protection::Read);
+        unsafe { sys::free(pages, 2 * page_size) };
+    }
 }

@@ -1,7 +1,10 @@
+pub mod arena;
 pub mod asm;
 pub mod error;
 pub mod hooks;
 pub mod mem;
+pub mod patch;
+mod sys;
 
 cfg_select! {
     feature = "macros" => {

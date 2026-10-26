@@ -1,6 +1,6 @@
 [package]
 name = "hooking"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 description = "hooking libs in rust"
@@ -10,7 +10,6 @@ repository = "https://github.com/pigeonhands/hooking-rs"
 [features]
 default = ["macros"]
 macros = [ "hooking_macros" ]
-win_close_alloc = []
 
 [dependencies]
 iced-x86 = { version = "1.21", default-features = false, features = [
@@ -22,8 +21,11 @@ iced-x86 = { version = "1.21", default-features = false, features = [
     "instr_info",
 ] }
 thiserror = "2.0.18"
-hooking_macros = { version = "0.5", path = "../hooking_macros/", optional = true}
+hooking_macros = { version = "0.6", path = "../hooking_macros/", optional = true}
 ctor = "1.0.7"
+
+[dev-dependencies]
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "intel"] }
 
 [target.'cfg(windows)'.profile.dev]
 split-debuginfo = "packed" # Or "off" to keep it all in the binary
@@ -33,7 +35,11 @@ libc = "0.2.182"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
 ] }

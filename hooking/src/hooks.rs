@@ -1,20 +1,28 @@
 use core::ffi;
 use core::{ffi::CStr, ptr::NonNull};
 use std::ffi::c_void;
+use std::ops::Range;
 
-use crate::asm::{DefaultHookAssembler, HookAssembler};
+use crate::arena::{CodeArena, DefaultArena};
+use crate::asm;
 use crate::error::{HookingError, Result};
-use crate::mem::{DefaultMemoryController, HookHeap, MemoryController, MemoryProtection};
+use crate::patch::{DefaultPatcher, PatchWriter};
+use crate::sys;
 
-static HOOK_HEAP: HookHeap<DefaultMemoryController> = HookHeap::new();
+static DEFAULT_ARENA: DefaultArena = DefaultArena::new();
+static DEFAULT_PATCHER: DefaultPatcher = DefaultPatcher::new();
+
+/// The longest x86 instruction.
+const MAX_INSTRUCTION_LEN: usize = 15;
 
 #[derive(Debug)]
-pub struct Hook<'a, M: MemoryController = DefaultMemoryController> {
-    pub data: HookData<'a, M>,
+pub struct Hook<'a> {
+    pub data: HookData<'a>,
+    patcher: &'a dyn PatchWriter,
     is_applied: bool,
 }
 
-impl Hook<'static, DefaultMemoryController> {
+impl Hook<'static> {
     pub unsafe fn by_name(
         module: Option<&CStr>,
         symbol: &CStr,
@@ -37,56 +45,27 @@ impl Hook<'static, DefaultMemoryController> {
     }
 }
 
-impl<'a, M: MemoryController> Hook<'a, M> {
+impl<'a> Hook<'a> {
     pub unsafe fn apply_hook(&mut self) -> Result<()> {
         if self.is_applied {
             return Ok(());
         }
-        let HookData {
-            mem,
-            patch_data,
-            symbol_address,
-            ..
-        } = &self.data;
-
-        let _protection_guard =
-            mem.protection_guard_for_page(*symbol_address, MemoryProtection::ReadWrite, None)?;
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                patch_data.as_ptr(),
-                symbol_address.as_ptr() as *mut _,
-                patch_data.len(),
-            );
-        }
+        let target = self.data.symbol_address.cast();
+        unsafe { self.patcher.write(target, &self.data.patch_data)? };
         self.is_applied = true;
 
         Ok(())
     }
+
     pub unsafe fn remove_hook(&mut self) -> Result<()> {
         if !self.is_applied {
             return Ok(());
         }
-
-        let HookData {
-            mem,
-            patch_data,
-            original_instructions,
-            symbol_address,
-            ..
-        } = &self.data;
-
-        let _protection_guard =
-            mem.protection_guard_for_page(*symbol_address, MemoryProtection::ReadWrite, None)?;
-
+        let target = self.data.symbol_address.cast();
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                original_instructions.as_ptr(),
-                symbol_address.as_ptr() as *mut _,
-                patch_data.len(),
-            );
-        }
-
+            self.patcher
+                .write(target, &self.data.original_instructions)?
+        };
         self.is_applied = false;
 
         Ok(())
@@ -94,31 +73,86 @@ impl<'a, M: MemoryController> Hook<'a, M> {
 }
 
 #[derive(Debug)]
-pub struct HookData<'a, M: MemoryController> {
+pub struct HookData<'a> {
     pub symbol_address: NonNull<ffi::c_void>,
     pub trampoline_data: &'a [u8],
     pub original_fn_call_stub_data: &'a [u8],
     pub patch_data: Vec<u8>,
     pub original_instructions: Vec<u8>,
-    mem: &'a M,
 }
 
-pub struct HookWriter<'a, M: MemoryController, A: HookAssembler> {
-    hook_heap: &'a HookHeap<M>,
-    asm: A,
+/// Where each part of a hook's code is, as offsets into the code placed in
+/// the arena:
+///
+/// | Bytes | Contents |
+/// | --- | --- |
+/// | 8 | Address of `original_fn`, read by the trampoline |
+/// | `trampoline` | Passes that address to the hook, then jumps to the hook |
+/// | `original_fn` | The instructions overwritten by the patch, then a jump back |
+struct HookLayout {
+    trampoline: Range<usize>,
+    original_fn: Range<usize>,
+    /// The jump to the trampoline, written over the target.
+    patch: Vec<u8>,
 }
 
-impl HookWriter<'static, DefaultMemoryController, DefaultHookAssembler> {
-    pub const fn from_static() -> Self {
-        Self::new(&HOOK_HEAP, DefaultHookAssembler::new())
+impl HookLayout {
+    /// Assemble a hook's code to run at `at`. `target_code` is the start of
+    /// the target function, which runs at `target`.
+    fn assemble(
+        at: usize,
+        target: usize,
+        target_code: &[u8],
+        destination: usize,
+    ) -> Result<(Vec<u8>, Self)> {
+        let slot_len = std::mem::size_of::<usize>();
+
+        let trampoline_at = at + slot_len;
+        let trampoline = asm::trampoline(trampoline_at, destination, at)?;
+
+        let original_fn_at = trampoline_at + trampoline.len();
+        let patch = asm::patch(target, trampoline_at)?;
+        let original_fn = asm::relocate(target_code, target, original_fn_at, patch.len())?;
+
+        let mut bytes = original_fn_at.to_ne_bytes().to_vec();
+        bytes.extend_from_slice(&trampoline);
+        bytes.extend_from_slice(&original_fn);
+
+        let trampoline = slot_len..slot_len + trampoline.len();
+        let original_fn = trampoline.end..bytes.len();
+        let layout = Self {
+            trampoline,
+            original_fn,
+            patch,
+        };
+        Ok((bytes, layout))
     }
 }
 
-impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
-    pub const fn new(hook_heap: &'a HookHeap<M>, assembler: A) -> Self {
+pub struct HookWriter<'a> {
+    arena: &'a dyn CodeArena,
+    patcher: &'a dyn PatchWriter,
+}
+
+impl HookWriter<'static> {
+    pub const fn from_static() -> Self {
+        Self::new(&DEFAULT_ARENA)
+    }
+}
+
+impl<'a> HookWriter<'a> {
+    pub const fn new(arena: &'a dyn CodeArena) -> Self {
         Self {
-            hook_heap,
-            asm: assembler,
+            arena,
+            patcher: &DEFAULT_PATCHER,
+        }
+    }
+
+    /// Use `patcher` to write hooks into their target functions.
+    pub const fn with_patcher(self, patcher: &'a dyn PatchWriter) -> Self {
+        Self {
+            arena: self.arena,
+            patcher,
         }
     }
 
@@ -127,13 +161,13 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
         module: Option<&CStr>,
         symbol: &CStr,
         destination: *mut u8,
-    ) -> Result<Hook<'a, M>> {
+    ) -> Result<Hook<'a>> {
         let destination = NonNull::new(destination as *mut c_void).ok_or_else(|| {
             HookingError::NoDestination(symbol.to_str().unwrap_or("<invalid-symbol-name>").into())
         })?;
 
         unsafe {
-            let symbol_address = self.hook_heap.mem.get_symbol_address(module, symbol)?;
+            let symbol_address = sys::find_symbol(module, symbol)?;
             self.create_hook(symbol_address, destination)
         }
     }
@@ -142,10 +176,11 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
         &self,
         target: NonNull<c_void>,
         destination: NonNull<c_void>,
-    ) -> Result<Hook<'a, M>> {
+    ) -> Result<Hook<'a>> {
         let hook_data = unsafe { self.write_hook_table(target, destination)? };
         Ok(Hook {
             data: hook_data,
+            patcher: self.patcher,
             is_applied: false,
         })
     }
@@ -154,67 +189,43 @@ impl<'a, M: MemoryController, A: HookAssembler> HookWriter<'a, M, A> {
         &self,
         target: NonNull<ffi::c_void>,
         destination_fn: NonNull<ffi::c_void>,
-    ) -> Result<HookData<'a, M>> {
-        let mut heap_handle = self.hook_heap.get_handle()?;
-        let mut write_handle = heap_handle.begin_write()?;
+    ) -> Result<HookData<'a>> {
+        let target_address = target.as_ptr() as usize;
+        let target_code = unsafe { decodable_code(target) };
+        let destination = destination_fn.as_ptr() as usize;
 
-        let restore_fn_address = unsafe { write_handle.reserve(std::mem::size_of::<usize>())? };
-        let mut eip = unsafe { write_handle.write_address()? }.as_ptr() as usize;
+        // `place` may assemble more than once; the last layout is the one placed.
+        let mut layout = None;
+        let placed_at = self.arena.place(Some(target_address), &mut |at| {
+            let (bytes, assembled) =
+                HookLayout::assemble(at, target_address, target_code, destination)?;
+            layout = Some(assembled);
+            Ok(bytes)
+        })?;
+        let layout = layout.expect("place assembles the code it places");
 
-        let (trampoline_address, trampoline_size) = {
-            let trampoline =
-                self.asm
-                    .assemble_trampoline(eip, destination_fn, Some(restore_fn_address))?;
-
-            eip += trampoline.len();
-
-            (
-                unsafe { write_handle.write_bytes(&trampoline)? },
-                trampoline.len(),
-            )
+        let placed = |range: Range<usize>| unsafe {
+            std::slice::from_raw_parts(placed_at.as_ptr().add(range.start), range.len())
         };
-
-        let patch = self
-            .asm
-            .assemble_patch(target.as_ptr() as usize, trampoline_address)?;
-
-        let (original_fn_call_stub_address, restore_stub_size) = {
-            let restore_stub = self
-                .asm
-                .relocate_instructions(eip, target, patch.len(), true)?;
-
-            //eip += restore_stub.len();
-            (
-                unsafe { write_handle.write_bytes(&restore_stub)? },
-                restore_stub.len(),
-            )
-        };
-
-        unsafe {
-            let write_restore_addr: usize = original_fn_call_stub_address.as_ptr() as usize;
-            restore_fn_address.cast().write(write_restore_addr);
-        }
-
-        let original_fn_instructions =
-            unsafe { std::slice::from_raw_parts(target.as_ptr() as *const u8, patch.len()) };
 
         Ok(HookData {
-            mem: &self.hook_heap.mem,
             symbol_address: target,
-            patch_data: patch,
-            original_instructions: original_fn_instructions.into(),
-            trampoline_data: unsafe {
-                core::slice::from_raw_parts(
-                    trampoline_address.as_ptr() as *const _,
-                    trampoline_size,
-                )
-            },
-            original_fn_call_stub_data: unsafe {
-                core::slice::from_raw_parts(
-                    original_fn_call_stub_address.as_ptr() as *const _,
-                    restore_stub_size,
-                )
-            },
+            trampoline_data: placed(layout.trampoline),
+            original_fn_call_stub_data: placed(layout.original_fn),
+            original_instructions: target_code[..layout.patch.len()].to_vec(),
+            patch_data: layout.patch,
         })
     }
+}
+
+/// The code at the start of `target` that relocation may decode: the
+/// longest patch, plus one more instruction that may start inside it.
+///
+/// Reading stops at the end of the page holding the last byte the longest
+/// patch could overwrite, so it never touches a page the patch wouldn't.
+unsafe fn decodable_code<'a>(target: NonNull<c_void>) -> &'a [u8] {
+    let start = target.as_ptr() as usize;
+    let page_end = sys::align_up(start + asm::MAX_PATCH_LEN, sys::page_size());
+    let len = (asm::MAX_PATCH_LEN + MAX_INSTRUCTION_LEN).min(page_end - start);
+    unsafe { std::slice::from_raw_parts(target.as_ptr().cast(), len) }
 }
