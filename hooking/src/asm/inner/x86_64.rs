@@ -112,76 +112,73 @@ impl HookAssembler for HookAssemblerx86_64 {
             let mut instr = decoder.decode();
             instruction_size_read += instr.len();
 
-            let mem_displacement = instr.memory_displacement64();
-            if self.bitness() == 64 && mem_displacement != 0 {
-                //  relative addressing is done with 32bit offsets
+            // BlockEncoder re-targets relative branches itself, and on 32bit
+            // every address is within rel32 range.
+            if self.bitness() != 64 {
+                a.add_instruction(instr)?;
+                continue;
+            }
+
+            if instr.is_ip_rel_memory_operand() {
+                //  relative memory addressing is done with 32bit offsets
                 //  even on 64bit. Move the absolute address into a reg
                 //  then patch the instruction to use the register.
 
-                if instr.memory_base() == Register::RIP {
-                    a.push(r10)?;
-                    a.mov(r10, mem_displacement)?;
+                a.push(r10)?;
+                a.mov(r10, instr.memory_displacement64())?;
 
-                    instr.set_memory_base(Register::R10);
-                    instr.set_memory_displacement64(0);
-                    a.add_instruction(instr)?;
+                instr.set_memory_base(Register::R10);
+                instr.set_memory_displacement64(0);
+                a.add_instruction(instr)?;
 
-                    a.pop(r10)?;
-                } else if instr.is_call_near() {
-                    // a.push(r10)?;
-                    // a.mov(r10, mem_displacement)?;
-                    // a.call(r10)?;
-                    // a.pop(r10)?;
+                a.pop(r10)?;
+            } else if instr.is_call_near() {
+                // no push/pop of r10: it would misalign the stack for the
+                // callee, and r10 is caller-saved so the callee may clobber it anyway
+                a.mov(r10, instr.near_branch_target())?;
+                a.call(r10)?;
+            } else if instr.is_jmp_short_or_near() {
+                // a.mov(r10, instr.near_branch_target())?;
+                // a.jmp(r10)?;
+                a.db(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])?; //JMP [RIP+0]
+                a.dq(&[instr.near_branch_target()])?;
+            } else if instr.is_jcc_short_or_near() {
+                // there is no such thing as a conditional 64bit jump
+                // so we create a non-conditional jump and cnditionally
+                // skip it if the reverse conditional is true.
 
-                    let mut rip_0 = a.create_label();
-                    a.call(rip_0)?;
-                    a.set_label(&mut rip_0)?;
-                    a.dq(&[mem_displacement])?;
-                } else if instr.is_jmp_short_or_near() {
-                    // a.mov(r10, mem_displacement)?;
-                    // a.jmp(r10)?;
-                    a.db(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])?; //JMP [RAX+0]
-                    a.dq(&[mem_displacement])?;
-                } else if instr.is_jcc_short_or_near() {
-                    // there is no such thing as a conditional 64bit jump
-                    // so we create a non-conditional jump and cnditionally
-                    // skip it if the reverse conditional is true.
+                let mut skip_to = a.create_label();
 
-                    let mut skip_to = a.create_label();
+                match instr.condition_code() {
+                    ConditionCode::e => a.jne(skip_to)?,
+                    ConditionCode::ne => a.je(skip_to)?,
+                    ConditionCode::b => a.jae(skip_to)?,
+                    ConditionCode::ae => a.jb(skip_to)?,
+                    ConditionCode::be => a.ja(skip_to)?,
+                    ConditionCode::a => a.jbe(skip_to)?,
+                    ConditionCode::l => a.jge(skip_to)?,
+                    ConditionCode::ge => a.jl(skip_to)?,
+                    ConditionCode::le => a.jg(skip_to)?,
+                    ConditionCode::g => a.jle(skip_to)?,
+                    ConditionCode::p => a.jnp(skip_to)?,
+                    ConditionCode::np => a.jp(skip_to)?,
+                    ConditionCode::o => a.jno(skip_to)?,
+                    ConditionCode::no => a.jo(skip_to)?,
+                    ConditionCode::s => a.jns(skip_to)?,
+                    ConditionCode::ns => a.js(skip_to)?,
+                    ConditionCode::None => a.jmp(skip_to)?,
+                };
 
-                    match instr.condition_code() {
-                        ConditionCode::e => a.jne(skip_to)?,
-                        ConditionCode::ne => a.je(skip_to)?,
-                        ConditionCode::b => a.jae(skip_to)?,
-                        ConditionCode::ae => a.jb(skip_to)?,
-                        ConditionCode::be => a.ja(skip_to)?,
-                        ConditionCode::a => a.jbe(skip_to)?,
-                        ConditionCode::l => a.jge(skip_to)?,
-                        ConditionCode::ge => a.jl(skip_to)?,
-                        ConditionCode::le => a.jg(skip_to)?,
-                        ConditionCode::g => a.jle(skip_to)?,
-                        ConditionCode::p => a.jnp(skip_to)?,
-                        ConditionCode::np => a.jp(skip_to)?,
-                        ConditionCode::o => a.jno(skip_to)?,
-                        ConditionCode::no => a.jo(skip_to)?,
-                        ConditionCode::s => a.jns(skip_to)?,
-                        ConditionCode::ns => a.js(skip_to)?,
-                        ConditionCode::None => a.jmp(skip_to)?,
-                    };
+                // a.push(r10)?;
+                // a.mov(r10, instr.near_branch_target())?;
+                // a.jmp(r10)?;
+                // a.pop(r10)?;
 
-                    // a.push(r10)?;
-                    // a.mov(r10, mem_displacement)?;
-                    // a.jmp(r10)?;
-                    // a.pop(r10)?;
+                // JMP [RIP+0]
+                a.db(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])?;
+                a.dq(&[instr.near_branch_target()])?;
 
-                    // JMP [RIP+0]
-                    a.db(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])?;
-                    a.dq(&[mem_displacement])?;
-
-                    a.set_label(&mut skip_to)?;
-                } else {
-                    a.add_instruction(instr)?;
-                }
+                a.set_label(&mut skip_to)?;
             } else {
                 a.add_instruction(instr)?;
             }
