@@ -4,15 +4,123 @@ use iced_x86::{
 };
 
 use super::*;
-use crate::ORIGINAL_FN_CHECKSUM_MAGIC;
 use crate::sys;
 
-/// Hooks pass the original function in r10/r11, so only 64bit is supported.
-const BITNESS: u32 = 64;
+pub use arch::MAX_PATCH_LEN;
+use arch::*;
 
-/// The longest patch: `jmp [rip+0]` followed by the 8 byte destination,
-/// used when the trampoline is out of rel32 range of the target.
-pub const MAX_PATCH_LEN: usize = 6 + 8;
+#[cfg(target_arch = "x86_64")]
+mod arch {
+    use iced_x86::code_asm::CodeAssembler;
+    use iced_x86::{Code, Instruction, MemoryOperand, Register};
+
+    use super::Result;
+    use crate::ORIGINAL_FN_CHECKSUM_MAGIC;
+
+    pub const BITNESS: u32 = 64;
+
+    /// The longest patch: `jmp [rip+0]` followed by the 8 byte destination,
+    /// used when the trampoline is out of rel32 range of the target.
+    pub const MAX_PATCH_LEN: usize = 6 + 8;
+
+    pub const JMP_REL32: Code = Code::Jmp_rel32_64;
+
+    /// Pass the original function's address, read from `original_fn_slot`,
+    /// in r10 with a checksum of it in r11, for `original_function_ptr`.
+    pub fn pass_original_fn(original_fn_slot: usize) -> Result<Vec<Instruction>> {
+        let slot = MemoryOperand::with_base_displ(Register::RIP, original_fn_slot as i64);
+        let checksum = ORIGINAL_FN_CHECKSUM_MAGIC as u64;
+        Ok(vec![
+            Instruction::with2(Code::Mov_r64_rm64, Register::R10, slot)?,
+            Instruction::with2(Code::Mov_r64_imm64, Register::R11, checksum)?,
+            Instruction::with2(Code::Xor_r64_rm64, Register::R11, Register::R10)?,
+        ])
+    }
+
+    /// x86_64 code finds its own address with RIP relative operands, which
+    /// `relocate` already handles.
+    pub unsafe fn relocate_pc_capture(
+        _a: &mut CodeAssembler,
+        _instr: &Instruction,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+#[cfg(target_arch = "x86")]
+mod arch {
+    use iced_x86::code_asm::CodeAssembler;
+    use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Register};
+
+    use super::Result;
+
+    pub const BITNESS: u32 = 32;
+
+    /// rel32 offsets reach the whole 32bit address space, so the patch is
+    /// always a `jmp rel32`.
+    pub const MAX_PATCH_LEN: usize = 5;
+
+    pub const JMP_REL32: Code = Code::Jmp_rel32_32;
+
+    /// x86 passes arguments on the stack, and a hook's prologue is free to
+    /// use any scratch register to copy them before its body runs, so there
+    /// is no register that would reliably reach `original_function_ptr`.
+    pub fn pass_original_fn(_original_fn_slot: usize) -> Result<Vec<Instruction>> {
+        Ok(Vec::new())
+    }
+
+    /// Position independent x86 code finds its own address by calling the
+    /// next instruction, or a `__x86.get_pc_thunk.*` helper, and reading the
+    /// return address. Relocated as a real call it would see the relocated
+    /// address, so these calls are emulated with the original one:
+    ///     call next_ip           ->  push original_next_ip
+    ///     call get_pc_thunk.reg  ->  mov reg, original_next_ip
+    /// Returns whether `instr` was one of these.
+    ///
+    /// # Safety
+    /// The target of `instr`, if it is a call, must be readable.
+    pub unsafe fn relocate_pc_capture(a: &mut CodeAssembler, instr: &Instruction) -> Result<bool> {
+        if instr.code() != Code::Call_rel32_32 {
+            return Ok(false);
+        }
+        let target = instr.near_branch_target();
+        let return_address = instr.next_ip() as u32;
+
+        if target == instr.next_ip() {
+            a.add_instruction(Instruction::with1(Code::Pushd_imm32, return_address)?)?;
+            return Ok(true);
+        }
+        if let Some(reg) = unsafe { pc_thunk_register(target) } {
+            a.add_instruction(Instruction::with2(
+                Code::Mov_r32_imm32,
+                reg,
+                return_address,
+            )?)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// The register loaded by the function at `address` if it is a
+    /// `__x86.get_pc_thunk.*`:
+    ///     mov reg, [esp]
+    ///     ret
+    ///
+    /// # Safety
+    /// `address` must be readable.
+    unsafe fn pc_thunk_register(address: u64) -> Option<Register> {
+        const THUNK_LEN: usize = 3 + 1;
+        let code = unsafe { std::slice::from_raw_parts(address as *const u8, THUNK_LEN) };
+        let mut decoder = Decoder::with_ip(BITNESS, code, address, DecoderOptions::NONE);
+        let (mov, ret) = (decoder.decode(), decoder.decode());
+
+        let loads_return_address = mov.code() == Code::Mov_r32_rm32
+            && mov.memory_base() == Register::ESP
+            && mov.memory_index() == Register::None
+            && mov.memory_displacement32() == 0;
+        (loads_return_address && ret.code() == Code::Retnd).then(|| mov.op0_register())
+    }
+}
 
 /// Bytes the System V ABI lets functions use below `rsp` without moving it.
 #[cfg(not(target_os = "windows"))]
@@ -20,7 +128,8 @@ const RED_ZONE: i64 = 128;
 #[cfg(target_os = "windows")]
 const RED_ZONE: i64 = 0;
 
-/// Registers that can be borrowed to hold a far address.
+/// Registers that can be borrowed to hold a far address. Only used on
+/// x86_64, as nothing is out of range on x86.
 const SCRATCH_REGISTERS: &[Register] = &[
     Register::RAX,
     Register::RCX,
@@ -54,8 +163,9 @@ pub fn patch(ip: usize, trampoline: usize) -> Result<Vec<u8>> {
     if sys::in_rel32_range(ip, trampoline) {
         a.jmp(trampoline as u64)?;
     } else {
-        // jmp [rip+0], with the destination straight after it. The block
-        // encoder's own far form pads the destination to 8 byte alignment.
+        // x86_64 only: jmp [rip+0], with the destination straight after it.
+        // The block encoder's own far form pads the destination to 8 byte
+        // alignment.
         let mut destination = a.create_label();
         a.jmp(qword_ptr(destination))?;
         a.set_label(&mut destination)?;
@@ -64,27 +174,22 @@ pub fn patch(ip: usize, trampoline: usize) -> Result<Vec<u8>> {
     Ok(a.assemble(ip as u64)?)
 }
 
-/// Jumps to `destination_fn`, passing it the original function's address
-/// (read from `original_fn_slot`) in r10, and a checksum of it in r11.
+/// Jumps to `destination_fn`, first passing it the original function where
+/// the architecture allows (see `pass_original_fn`).
 pub fn trampoline(ip: usize, destination_fn: usize, original_fn_slot: usize) -> Result<Vec<u8>> {
-    let slot = MemoryOperand::with_base_displ(Register::RIP, original_fn_slot as i64);
-    let checksum = ORIGINAL_FN_CHECKSUM_MAGIC as u64;
-
-    encode(
-        ip,
-        &[
-            Instruction::with2(Code::Mov_r64_rm64, Register::R10, slot)?,
-            Instruction::with2(Code::Mov_r64_imm64, Register::R11, checksum)?,
-            Instruction::with2(Code::Xor_r64_rm64, Register::R11, Register::R10)?,
-            Instruction::with_branch(Code::Jmp_rel32_64, destination_fn as u64)?,
-        ],
-    )
+    let mut instructions = pass_original_fn(original_fn_slot)?;
+    instructions.push(Instruction::with_branch(JMP_REL32, destination_fn as u64)?);
+    encode(ip, &instructions)
 }
 
 /// Copy whole instructions from the start of `code` (which runs at `from`)
 /// until at least `min_len` bytes are covered, adjusted to run at `to`, then
 /// jump back to the first instruction that wasn't copied.
-pub fn relocate(code: &[u8], from: usize, to: usize, min_len: usize) -> Result<Vec<u8>> {
+///
+/// # Safety
+/// The targets of calls in the copied instructions must be readable, as on
+/// x86 they are checked for `__x86.get_pc_thunk.*` (see `relocate_pc_capture`).
+pub unsafe fn relocate(code: &[u8], from: usize, to: usize, min_len: usize) -> Result<Vec<u8>> {
     let mut a = CodeAssembler::new(BITNESS)?;
     let mut decoder = Decoder::with_ip(BITNESS, code, from as u64, DecoderOptions::NONE);
     let mut info = InstructionInfoFactory::new();
@@ -100,6 +205,10 @@ pub fn relocate(code: &[u8], from: usize, to: usize, min_len: usize) -> Result<V
         }
         copied += instr.len();
 
+        if unsafe { relocate_pc_capture(&mut a, &instr)? } {
+            continue;
+        }
+
         let is_far_memory_operand = instr.is_ip_rel_memory_operand()
             && !sys::in_rel32_range(to, instr.ip_rel_memory_address() as usize);
         if is_far_memory_operand {
@@ -114,8 +223,9 @@ pub fn relocate(code: &[u8], from: usize, to: usize, min_len: usize) -> Result<V
 }
 
 /// Rewrite an instruction whose RIP relative memory operand, at `address`,
-/// is out of rel32 range of the relocated code. All rewrites preserve every
-/// register and flag the original instruction didn't change.
+/// is out of rel32 range of the relocated code. x86_64 only, as x86 has no
+/// RIP relative operands. All rewrites preserve every register and flag
+/// the original instruction didn't change.
 fn relocate_far_memory_operand(
     a: &mut CodeAssembler,
     info: &mut InstructionInfoFactory,
@@ -237,7 +347,7 @@ fn with_scratch_register(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
     use iced_x86::Formatter;
@@ -277,8 +387,14 @@ mod tests {
             .collect()
     }
 
+    /// Relocate code from `FROM`. It has no calls to `__x86.get_pc_thunk.*`
+    /// candidates to read, as those are only looked for on x86.
+    fn relocate_from(code: &[u8], to: usize, min_len: usize) -> Result<Vec<u8>> {
+        unsafe { relocate(code, FROM, to, min_len) }
+    }
+
     fn relocate_one(instruction: Instruction, to: usize) -> Vec<String> {
-        let relocated = relocate(&assemble(&[instruction]), FROM, to, 1).unwrap();
+        let relocated = relocate_from(&assemble(&[instruction]), to, 1).unwrap();
         disassemble(&relocated, to)
     }
 
@@ -376,7 +492,7 @@ mod tests {
     fn far_stack_users_are_refused() {
         let code = assemble(&[Instruction::with1(Code::Push_rm64, rip_data()).unwrap()]);
         assert!(matches!(
-            relocate(&code, FROM, FAR, 1),
+            relocate_from(&code, FAR, 1),
             Err(AssemblyError::UnsupportedRelocation(Code::Push_rm64))
         ));
     }
@@ -395,7 +511,7 @@ mod tests {
         for (code, inverted) in branches {
             let original = assemble(&[Instruction::with_branch(code, target).unwrap()]);
             let branch_len = original.len() - 1;
-            let relocated = relocate(&original, FROM, FAR, 1).unwrap();
+            let relocated = relocate_from(&original, FAR, 1).unwrap();
             let out = decode(&relocated, FAR);
 
             // The inverted condition skips an absolute jump to the original target...
@@ -419,7 +535,7 @@ mod tests {
         let target = (FROM + 0x50) as u64;
         for code in [Code::Loop_rel8_64_RCX, Code::Jrcxz_rel8_64] {
             let original = assemble(&[Instruction::with_branch(code, target).unwrap()]);
-            let relocated = relocate(&original, FROM, FAR, 1).unwrap();
+            let relocated = relocate_from(&original, FAR, 1).unwrap();
             let out = decode(&relocated, FAR);
 
             // The branch keeps its condition and lands on an absolute jump
@@ -443,7 +559,7 @@ mod tests {
     fn far_call_uses_long_form() {
         let target = (FROM + 0x50) as u64;
         let original = assemble(&[Instruction::with_branch(Code::Call_rel32_64, target).unwrap()]);
-        let relocated = relocate(&original, FROM, FAR, 1).unwrap();
+        let relocated = relocate_from(&original, FAR, 1).unwrap();
         let call = &decode(&relocated, FAR)[0];
         assert_eq!(call.code(), Code::Call_rm64);
         assert_eq!(pointer_read_by(call, &relocated, FAR), target);
@@ -457,7 +573,87 @@ mod tests {
             Instruction::with2(Code::Sub_rm64_imm8, Register::RSP, 0x20u32).unwrap(),
         ]);
         // 5 bytes ends inside `sub rsp, 0x20`, so all 8 bytes are copied.
-        let out = disassemble(&relocate(&code, FROM, NEAR, 5).unwrap(), NEAR);
+        let out = disassemble(&relocate_from(&code, NEAR, 5).unwrap(), NEAR);
         assert_eq!(out[3], format!("jmp {:016X}h", FROM + 8));
+    }
+}
+
+#[cfg(all(test, target_arch = "x86"))]
+mod tests {
+    use super::*;
+
+    const LOW: usize = 0x1000_0000;
+    const HIGH: usize = 0xF000_0000;
+
+    fn decode(bytes: &[u8], ip: usize) -> Vec<Instruction> {
+        Decoder::with_ip(32, bytes, ip as u64, DecoderOptions::NONE)
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn patch_reaches_across_the_address_space() {
+        for (from, to) in [(LOW, HIGH), (HIGH, LOW)] {
+            let patch = patch(from, to).unwrap();
+            assert_eq!(patch.len(), MAX_PATCH_LEN);
+            let jmp = &decode(&patch, from)[0];
+            assert_eq!(jmp.code(), Code::Jmp_rel32_32);
+            assert_eq!(jmp.near_branch_target(), to as u64);
+        }
+    }
+
+    #[test]
+    fn trampoline_only_jumps() {
+        let trampoline = decode(&trampoline(LOW, HIGH, LOW - 4).unwrap(), LOW);
+        assert_eq!(trampoline.len(), 1);
+        assert_eq!(trampoline[0].near_branch_target(), HIGH as u64);
+    }
+
+    /// The bytes of `__x86.get_pc_thunk.bx`: mov ebx, [esp]; ret
+    static PC_THUNK_BX: [u8; 4] = [0x8B, 0x1C, 0x24, 0xC3];
+    /// Something that isn't a thunk, for calls to be read from.
+    static NOT_A_THUNK: [u8; 4] = [0x90, 0x90, 0x90, 0xC3];
+
+    fn relocate_from_low(instructions: &[Instruction], min_len: usize) -> Vec<Instruction> {
+        let mut instructions = instructions.to_vec();
+        instructions.push(Instruction::with(Code::Int3));
+        let original = encode(LOW, &instructions).unwrap();
+        decode(
+            &unsafe { relocate(&original, LOW, HIGH, min_len) }.unwrap(),
+            HIGH,
+        )
+    }
+
+    #[test]
+    fn call_next_instruction_pushes_original_address() {
+        let call_next = Instruction::with_branch(Code::Call_rel32_32, (LOW + 5) as u64).unwrap();
+        let out = relocate_from_low(&[call_next], 1);
+        assert_eq!(out[0].code(), Code::Pushd_imm32);
+        assert_eq!(out[0].immediate32(), (LOW + 5) as u32);
+    }
+
+    #[test]
+    fn call_pc_thunk_loads_original_address() {
+        let thunk = PC_THUNK_BX.as_ptr() as u64;
+        let call_thunk = Instruction::with_branch(Code::Call_rel32_32, thunk).unwrap();
+        let out = relocate_from_low(&[call_thunk], 1);
+        assert_eq!(out[0].code(), Code::Mov_r32_imm32);
+        assert_eq!(out[0].op0_register(), Register::EBX);
+        assert_eq!(out[0].immediate32(), (LOW + 5) as u32);
+    }
+
+    #[test]
+    fn relocated_branches_keep_their_targets() {
+        let target = NOT_A_THUNK.as_ptr() as u64;
+        let je = Instruction::with_branch(Code::Je_rel32_32, target).unwrap();
+        let call = Instruction::with_branch(Code::Call_rel32_32, target).unwrap();
+        let copied_len = 6 + 5;
+
+        let out = relocate_from_low(&[je, call], copied_len);
+        assert_eq!(out[0].code(), Code::Je_rel32_32);
+        assert_eq!(out[0].near_branch_target(), target);
+        assert_eq!(out[1].code(), Code::Call_rel32_32);
+        assert_eq!(out[1].near_branch_target(), target);
+        assert_eq!(out[2].near_branch_target(), (LOW + copied_len) as u64);
     }
 }

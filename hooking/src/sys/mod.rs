@@ -43,7 +43,8 @@ pub fn page_range(ptr: usize, len: usize) -> (usize, usize) {
 
 /// Whether `to` can be reached from `from` with a rel32 offset.
 pub fn in_rel32_range(from: usize, to: usize) -> bool {
-    from.abs_diff(to) < REL32_REACH
+    // On 32bit, rel32 offsets wrap around and reach every address.
+    cfg!(target_pointer_width = "32") || from.abs_diff(to) < REL32_REACH
 }
 
 /// Addresses within rel32 range of `near`, `step` apart, moving outwards

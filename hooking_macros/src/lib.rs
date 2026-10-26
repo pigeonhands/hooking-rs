@@ -67,13 +67,12 @@ pub fn hook(attr: TokenStream, item: TokenStream) -> TokenStream {
             pub type FunctionSignature = #fn_ptr_type;
 
 
-            /// This should be the first method called in the hook function
-            /// in orfer for it to function correctly.
+            /// The hooked function's original code, which can be called while
+            /// the hook is applied.
             ///
-            /// This will return None if not called from a function that was
-            /// invoked from a hook.
+            /// This will return None if the hook failed to be created.
             pub unsafe fn original_function() -> Option<FunctionSignature> {
-                ::hooking::original_function_ptr().map(|f| {
+                __macro_support::original_function(&__HOOK).map(|f| {
                     std::mem::transmute(f.as_ptr())
                 })
             }

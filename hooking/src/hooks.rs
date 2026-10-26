@@ -46,6 +46,12 @@ impl Hook<'static> {
 }
 
 impl<'a> Hook<'a> {
+    /// The hooked function's original code, relocated so it can still be
+    /// called while the hook is applied.
+    pub fn original_function(&self) -> NonNull<c_void> {
+        NonNull::from(self.data.original_fn_call_stub_data).cast()
+    }
+
     pub unsafe fn apply_hook(&mut self) -> Result<()> {
         if self.is_applied {
             return Ok(());
@@ -86,7 +92,7 @@ pub struct HookData<'a> {
 ///
 /// | Bytes | Contents |
 /// | --- | --- |
-/// | 8 | Address of `original_fn`, read by the trampoline |
+/// | pointer size | Address of `original_fn`, read by the trampoline on x86_64 |
 /// | `trampoline` | Passes that address to the hook, then jumps to the hook |
 /// | `original_fn` | The instructions overwritten by the patch, then a jump back |
 struct HookLayout {
@@ -112,7 +118,9 @@ impl HookLayout {
 
         let original_fn_at = trampoline_at + trampoline.len();
         let patch = asm::patch(target, trampoline_at)?;
-        let original_fn = asm::relocate(target_code, target, original_fn_at, patch.len())?;
+        // The target is live code, so the calls it makes are readable.
+        let original_fn =
+            unsafe { asm::relocate(target_code, target, original_fn_at, patch.len())? };
 
         let mut bytes = original_fn_at.to_ne_bytes().to_vec();
         bytes.extend_from_slice(&trampoline);

@@ -1,7 +1,12 @@
-use std::arch::asm;
-
 use core::ptr::NonNull;
+use std::sync::OnceLock;
+
 use hooking::{HookData, HookWriter};
+
+type AddFn = extern "C" fn(a: i32, b: i32) -> i32;
+
+/// The original `add_two_numbers_together`, set once the hook has been created.
+static ORIGINAL_ADD: OnceLock<AddFn> = OnceLock::new();
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn add_two_numbers_together(a: i32, b: i32) -> i32 {
@@ -10,13 +15,7 @@ pub unsafe extern "C" fn add_two_numbers_together(a: i32, b: i32) -> i32 {
 }
 
 unsafe extern "C" fn hook(a: i32, b: i32) -> i32 {
-    let original_add: extern "C" fn(a: i32, b: i32) -> i32 = unsafe {
-        std::mem::transmute(
-            hooking::original_function_ptr()
-                .expect("must be invoked from hook")
-                .as_ptr(),
-        )
-    };
+    let original_add = ORIGINAL_ADD.get().expect("set before the hook is called");
 
     println!("Hooked with params: ({a}, {b})");
 
@@ -33,6 +32,8 @@ fn main() {
             )
             .unwrap()
     };
+    let original: AddFn = unsafe { std::mem::transmute(hook.original_function().as_ptr()) };
+    ORIGINAL_ADD.set(original).unwrap();
 
     let HookData {
         trampoline_data, ..
@@ -40,20 +41,7 @@ fn main() {
 
     println!("about to run hook");
 
-    unsafe {
-        #[cfg(target_os = "linux")]
-        asm! {
-            "mov rdi, 6",
-            "mov rsi, 7",
-            "call {}",
-            in(reg)trampoline_data.as_ptr()
-        }
-        #[cfg(target_os = "windows")]
-        asm! {
-            "mov rcx, 6",
-            "mov rdx, 7",
-            "call {}",
-            in(reg)trampoline_data.as_ptr()
-        }
-    }
+    // The hook isn't applied, so call its trampoline directly.
+    let trampoline: AddFn = unsafe { std::mem::transmute(trampoline_data.as_ptr()) };
+    trampoline(6, 7);
 }

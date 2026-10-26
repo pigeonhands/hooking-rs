@@ -19,7 +19,7 @@ hooking-rs
 Function hooking in rust
 -----
 
-A library for hooking and intercepting functions in rust for windows and linux
+A library for hooking and intercepting functions in rust for windows and linux, on x86_64 and x86.
 
 ## Arenas and patchers
 
@@ -58,23 +58,23 @@ Each function creates a stub in memory that consists of
 | Section | Description |
 | ------| ------|
 | Original fn detour stub address | A function pointer the generated detour stub to call the original function |
-| Hooking stub | A small stub that adds some metadata (like adding detour stub address to r10 reg) before calling the hook |
+| Hooking stub | A small stub that jumps to the hook. On x86_64 it first passes the original fn detour stub address in r10, for `original_function_ptr` |
 | Original fn detour stub | stub that re-creates the original fn call instructions and patches the instructions to work with ling jumps, then calls the hooked function |
 
 
 A simple hook:
 
 ```rust
+// MessageBoxA is stdcall on x86, so the hook must be "system" too.
 #[hook(lib = "user32.dll", method = "MessageBoxA")]
-unsafe extern "C" fn hook_destination(
+unsafe extern "system" fn hook_destination(
     _: *mut std::ffi::c_void,
     lp_text: *const i8,
     lp_caption: *const i8,
     _: u32,
 ) -> i32 {
     let original_msgbox = unsafe {
-        hook_destination::original_function()
-            .expect("hook_destination must be invoked from hook for original_function to work")
+        hook_destination::original_function().expect("the hook was created")
     };
 
     original_msgbox(
@@ -85,10 +85,13 @@ unsafe extern "C" fn hook_destination(
     )
 }
 
-unsafe {
-    unsafe { hook_destination::enable_hook(); }
-}
+unsafe { hook_destination::enable_hook().unwrap() };
 
 ```
+
+Without the macro, `Hook::original_function` gives the original function, which the hook
+can read from wherever it was stored. On x86_64, `hooking::original_function_ptr()` also
+returns it from inside the hook, as long as it is called before anything else in the hook.
+x86 passes arguments on the stack, so it has no register to spare for this.
 
 You can see more examples in the [example](https://github.com/pigeonhands/hooking-rs/tree/master/examples) directory of the repository.

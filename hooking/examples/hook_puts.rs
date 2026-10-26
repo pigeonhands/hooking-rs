@@ -1,17 +1,16 @@
+use std::ffi::CStr;
+use std::sync::OnceLock;
+
 use hooking::Hook;
-pub use hooking::{HookData, HookWriter};
-pub use std::{arch::asm, ffi::CStr};
+
+type PutsFn = extern "C" fn(*const i8);
+
+/// The original `puts`, set once the hook has been created.
+static ORIGINAL_PUTS: OnceLock<PutsFn> = OnceLock::new();
 
 unsafe extern "C" fn hooked_puts(s: *const i8) {
     let param_s = unsafe { CStr::from_ptr(s) };
-
-    let original_puts: extern "C" fn(*const i8) = unsafe {
-        std::mem::transmute(
-            hooking::original_function_ptr()
-                .expect("must be invoked from hook")
-                .as_ptr(),
-        )
-    };
+    let original_puts = ORIGINAL_PUTS.get().expect("set before the hook is applied");
 
     println!(
         "Hooked function param: {:?} | Original fn restore jump: {:?}",
@@ -23,6 +22,8 @@ unsafe extern "C" fn hooked_puts(s: *const i8) {
 
 fn main() {
     let mut hook = unsafe { Hook::by_name(None, c"puts", hooked_puts as *mut u8).unwrap() };
+    let original: PutsFn = unsafe { std::mem::transmute(hook.original_function().as_ptr()) };
+    ORIGINAL_PUTS.set(original).unwrap();
 
     unsafe {
         hook.apply_hook().unwrap();

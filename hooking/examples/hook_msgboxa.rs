@@ -1,5 +1,6 @@
 use hooking::Hook;
 use std::ffi::CStr;
+use std::sync::OnceLock;
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -11,19 +12,22 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-unsafe extern "C" fn hook_destination(
+// MessageBoxA is stdcall on x86, so the hook and the original must be
+// "system" too.
+type MessageBoxFn = extern "system" fn(*mut std::ffi::c_void, *const i8, *const i8, u32) -> i32;
+
+/// The original MessageBoxA, set once the hook has been created.
+static ORIGINAL_MSGBOX: OnceLock<MessageBoxFn> = OnceLock::new();
+
+unsafe extern "system" fn hook_destination(
     _: *mut std::ffi::c_void,
     lp_text: *const i8,
     lp_caption: *const i8,
     _: u32,
 ) -> i32 {
-    let original_msgbox: extern "C" fn(*mut std::ffi::c_void, *const i8, *const i8, u32) -> i32 = unsafe {
-        std::mem::transmute(
-            hooking::original_function_ptr()
-                .expect("must be invoked from hook")
-                .as_ptr(),
-        )
-    };
+    let original_msgbox = ORIGINAL_MSGBOX
+        .get()
+        .expect("set before the hook is applied");
 
     println!(
         "Called with title: {:?} | Body: {:?}",
@@ -48,6 +52,8 @@ fn main() {
         )
         .unwrap()
     };
+    let original: MessageBoxFn = unsafe { std::mem::transmute(hook.original_function().as_ptr()) };
+    ORIGINAL_MSGBOX.set(original).unwrap();
 
     println!("Applying hook");
 
