@@ -21,6 +21,12 @@ cfg_select! {
 pub use hooks::{Hook, HookData, HookWriter};
 
 #[cfg(target_arch = "x86_64")]
+pub use hooks::{
+    CallResult, DispatchResult, HookAction, SavedRegs, SavedRegsDispatch,
+    call_with_saved_regs,
+};
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) const ORIGINAL_FN_CHECKSUM_MAGIC: usize = 0xDEADBEEFCAFEBABE;
 
 /// The original function of the hook currently running, which its trampoline
